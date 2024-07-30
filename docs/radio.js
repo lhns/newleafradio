@@ -73,10 +73,12 @@ function playSong(hour) {
 
     player.play();
 
-    player.addEventListener("loadeddata", () => {
-      const now = new Date();
-      const second = now.getMinutes() * 60 + now.getSeconds() + now.getMilliseconds() / 1000;
-      player.currentTime = second % player.duration;
+    // synchronize the playback to the current second of hour
+    player.addEventListener("play", () => {
+        player.addEventListener("playing", () => {
+            const secondOfHour = (Date.now() / 1000) % 3600;
+            player.currentTime = secondOfHour % player.duration;
+        }, { once: true });
     });
 
     fadeIn();
