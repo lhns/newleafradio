@@ -72,6 +72,13 @@ function playSong(hour) {
     document.body.append(player);
 
     player.play();
+
+    player.addEventListener("loadeddata", () => {
+      const now = new Date();
+      const second = now.getMinutes() * 60 + now.getSeconds() + now.getMilliseconds() / 1000;
+      player.currentTime = second % player.duration;
+    });
+
     fadeIn();
 }
 
