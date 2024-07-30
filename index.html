@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=yes">
+        <meta name="description" content="Hourly Animal Crossing Radio. Listen to your favorite, relaxing music while you study, work, or just lay back and relax"/>
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="" crossorigin="anonymous">
+        <link rel="stylesheet" href="styles.css">
+        <title>New Leaf Radio</title>
+        <link rel="icon" href="a032b7da-b36c-4292-9322-7d4c98be233b_favicon.ico" type="image/x-icon"/>
+    </head>
+    <body>
+        <div class="main container-fluid">           
+            <div class="main row pt-4 pb-4 justify-content-center">
+                <div class="blog-body col-10 col-lg-8">
+                    <h1 class="w-100 titlecard">New Leaf Radio</h1>
+                    <div class="body container-fluid p-4">
+                        <div class="row">
+                            <div class="col-12 col-md-6">
+                                <a href="radio.html"><button type="button" class="btn btn-block btn-lg mt-2 mb-2">Radio</button></a>
+                                <a href="credit.html"><button type="button" class="btn btn-block btn-lg mt-2 mb-4">Credits</button></a>
+                                <h3>
+                                    Welcome to New Leaf Radio
+                                </h3>
+                                <h4>
+                                    24/7 Hourly Animal Crossing Music
+                                </h4>
+                                <p>
+                                    New Leaf Radio is a site that is a dedicated source for Animal Crossing music 24/7. The site will play tracks from the popular series Animal Crossing
+                                    based on the the current hour reported by your browser. New Leaf Radio now supports tracks from New Horizons! Yeah that's a whole two games in this beast! Its
+                                    various tracks are sourced from those available on Youtube (see <a href="credit">Credits for more details</a>) for free. 
+                                </p>
+                                <p>
+                                    We avoid monetization because I didn't compose these, I didn't do any of the work to get them out of the game, or anything besides make this lil' site here. 
+                                    If you do feel so inclined to support me as a developer, I have a "Buy me a Coffee" link on the radio page. This won't affect how I support or treat this site, 
+                                  since it will always be a cute little hobby of mine to maintain; you'll just be sending me a coffee :) (Fun fact: Developers do, in fact, run largely on coffee)
+                                </p>
+                                <p>
+                                    Thanks to the gracious hosting here on glitch, this site will be around 24/7, 365 days a year, and for the forseeable future. I don't plan to every monetize
+                                    the site at this time and want to leave it as accessible to the general public as possible
+                                </p>
+                                <h4>
+                                    What's under the hood?
+                                </h4>
+                                <p>
+                                    The websites backend is a low to the ground Node Express server that handles request for various webpages. Besides 
+                                    that little more is really done server side and keeping it light helps make the load on it low (with free hosting 
+                                    that's a must!)
+                                </p>
+                                <p>
+                                    The frontend is vanilla html supported by Bootstrap. It helps make a modern-looking and attractive website
+                                    without the overhead of recreating the wheel on various components. It is very much mobile-first and its support of breakpoint
+                                    classes allows any developer ample support to creating a responsive webpage.
+                                </p>
+                                <p>
+                                    The key feature that makes this project stand out from similar ventures like this is the integration of dynamic weather support. Leveraging a 
+                                    public api hosted by the National Weather Service and the built in browser functions for geoLocation, we can determine a client's 
+                                    nearest weather station and determine the category of precipitation. Using that data, we can play music whose ambience matches what's 
+                                    right outside their window! Wowzers!
+                                </p>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <img class="d-md-block d-none w-100" src="a032b7da-b36c-4292-9322-7d4c98be233b_welcome_image.png">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="" crossorigin="anonymous"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="" crossorigin="anonymous"></script>
+        <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="" crossorigin="anonymous"></script>
+    </body>
+</html><
