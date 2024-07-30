@@ -1,4 +1,4 @@
-# [newleafradio](https://lhns.github.io/newleafradio)
+# [newleafradio](https://newleafradio.lhns.de)
 
 Reupload from https://newleafradio.glitch.me/
 
