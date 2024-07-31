@@ -9,6 +9,9 @@ var lng = 0;
 var filePathPrefix = "Normal";
 var currentGame = "NewLeaf";
 var maxVolume = 1;
+var latency = 0;
+
+const audioCtx = new AudioContext();
 
 async function playRadio() {
     coffeeBreakFlag = false;
@@ -27,6 +30,10 @@ async function playRadio() {
     if (checkWeatherFlag) {
         await updateCurrentWeather();
     }
+
+    latency = audioCtx.outputLatency;
+    console.log("Audio latency: " + latency + "s");
+
     console.log("playing song...");
     playSong(now.getHours());
 
@@ -65,8 +72,12 @@ function playSong(hour) {
 
     const player = document.createElement('audio');
     player.id = `current-song`
-    player.src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${prefix}${currentGame}_${hour}${suffix}.mp3`;
-    //player.src = `songs/a032b7da-b36c-4292-9322-7d4c98be233b_${prefix}${currentGame}_${hour}${suffix}.mp3`;
+    let ext = "mp3";
+    if (currentGame === "WildWorld") {
+        ext = "m4a";
+    }
+    player.src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${prefix}${currentGame}_${hour}${suffix}.${ext}`;
+    //player.src = `songs/${prefix}${currentGame}/${hour}${suffix}.${ext}`;
     player.volume = 0;
     player.loop = true;
     document.body.append(player);
@@ -76,7 +87,7 @@ function playSong(hour) {
     // synchronize the playback to the current second of hour
     player.addEventListener("play", () => {
         player.addEventListener("playing", () => {
-            const secondOfHour = (Date.now() / 1000) % 3600;
+            const secondOfHour = (Date.now() / 1000 - latency) % 3600;
             player.currentTime = secondOfHour % player.duration;
         }, { once: true });
     });
