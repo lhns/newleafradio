@@ -88,7 +88,7 @@ async function playSong(hour) {
     console.log(response);
     const blob = await response.blob();
 
-    player.srcObject = blob;
+    player.src = URL.createObjectURL(blob);
     //player.src = `songs/${dirName}/${fileName}`;
     player.volume = 0;
     player.loop = true;
