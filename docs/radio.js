@@ -11,8 +11,6 @@ var currentGame = "NewLeaf";
 var maxVolume = 1;
 var latency = 0;
 
-const audioCtx = new AudioContext();
-
 async function playRadio() {
     coffeeBreakFlag = false;
     const now = new Date();
@@ -31,6 +29,7 @@ async function playRadio() {
         await updateCurrentWeather();
     }
 
+    const audioCtx = new AudioContext();
     latency = audioCtx.outputLatency;
     console.log("Audio latency: " + latency + "s");
 
@@ -80,13 +79,17 @@ function playSong(hour) {
     const fileName = `${hour}${suffix}.${ext}`
     console.log(`${dirName}/${fileName}`);
 
-    let src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
-    if (currentGame === "WildWorld") {
-        src = `https://ipfs.io/ipfs/QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
-    }
-    //const src = `songs/${dirName}/${fileName}`;
+    //let src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
+    //if (currentGame === "WildWorld") {
+    //    src = `https://ipfs.io/ipfs/QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
+    //}
+    const src = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
+    const response = await HeliaVerifiedFetch.verifiedFetch(src);
+    console.log(response);
+    const blob = await response.blob();
 
-    player.src = src;
+    player.srcObject = blob;
+    //player.src = `songs/${dirName}/${fileName}`;
     player.volume = 0;
     player.loop = true;
     document.body.append(player);
@@ -94,11 +97,16 @@ function playSong(hour) {
     player.play();
 
     // synchronize the playback to the current second of hour
-    player.addEventListener("play", () => {
-        player.addEventListener("playing", () => {
-            const secondOfHour = (Date.now() / 1000 - latency) % 3600;
-            player.currentTime = secondOfHour % player.duration;
-        }, { once: true });
+    let lastSync = 0;
+    player.addEventListener("playing", () => {
+        const seconds = Date.now() / 1000;
+        if (seconds - lastSync > 10) {
+            const secondOfHour = (seconds - latency) % 3600;
+            const secondOffset = secondOfHour % player.duration;
+            console.log("Second offset: " + secondOffset);
+            lastSync = seconds;
+            player.currentTime = secondOffset;
+        }
     });
 
     fadeIn();
