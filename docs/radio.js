@@ -35,7 +35,7 @@ async function playRadio() {
     console.log("Audio latency: " + latency + "s");
 
     console.log("playing song...");
-    playSong(now.getHours());
+    await playSong(now.getHours());
 
     timer = setTimeout(function () {
         if (!coffeeBreakFlag) {
@@ -58,7 +58,7 @@ function stopRadio() {
     }
 }
 
-function playSong(hour) {
+async function playSong(hour) {
     const prefix = filePathPrefix;
     const suffix = (hour >= 12) ? 'PM' : 'AM';
     hour = (hour > 12) ? hour - 12 : hour;
@@ -80,13 +80,17 @@ function playSong(hour) {
     const fileName = `${hour}${suffix}.${ext}`
     console.log(`${dirName}/${fileName}`);
 
-    let src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
-    if (currentGame === "WildWorld") {
-        src = `https://ipfs.io/ipfs/QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
-    }
-    //const src = `songs/${dirName}/${fileName}`;
+    //let src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
+    //if (currentGame === "WildWorld") {
+    //    src = `https://ipfs.io/ipfs/QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
+    //}
+    const src = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
+    const response = await HeliaVerifiedFetch.verifiedFetch(src, {redirect: 'follow'});
+    console.log(response);
+    const blob = await response.blob();
 
-    player.src = src;
+    player.srcObject = blob;
+    //player.src = `songs/${dirName}/${fileName}`;
     player.volume = 0;
     player.loop = true;
     document.body.append(player);
@@ -94,11 +98,17 @@ function playSong(hour) {
     player.play();
 
     // synchronize the playback to the current second of hour
-    player.addEventListener("play", () => {
-        player.addEventListener("playing", () => {
+    let ignore = false;
+    player.addEventListener("playing", () => {
+        if (ignore) {
+            ignore = false;
+        } else {
             const secondOfHour = (Date.now() / 1000 - latency) % 3600;
-            player.currentTime = secondOfHour % player.duration;
-        }, { once: true });
+            const secondOffset = secondOfHour % (player.duration + 0.2);
+            console.log("Second offset: " + secondOffset);
+            ignore = true;
+            player.currentTime = secondOffset;
+        }
     });
 
     fadeIn();
