@@ -76,7 +76,8 @@ function playSong(hour) {
     if (currentGame === "WildWorld") {
         ext = "m4a";
     }
-    player.src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${prefix}${currentGame}_${hour}${suffix}.${ext}`;
+    //player.src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${prefix}${currentGame}_${hour}${suffix}.${ext}`;
+    player.src = `https://ipfs.io/ipfs/QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${prefix}${currentGame}/${hour}${suffix}.${ext}`;
     //player.src = `songs/${prefix}${currentGame}/${hour}${suffix}.${ext}`;
     player.volume = 0;
     player.loop = true;
