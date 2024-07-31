@@ -53,6 +53,7 @@ function stopRadio() {
 
     const oldAudio = document.querySelector('audio');
     if (oldAudio) {
+        oldAudio.abortController?.abort();
         oldAudio.remove();
     }
 }
@@ -66,11 +67,14 @@ async function playSong(hour) {
 
     const oldAudio = document.querySelector('audio');
     if (oldAudio) {
+        oldAudio.abortController?.abort();
         oldAudio.remove();
     }
 
-    const player = document.createElement('audio');
-    player.id = `current-song`
+    const audio = document.createElement('audio');
+    audio.id = `current-song`
+
+    const abortController = new AbortController();
     let ext = "mp3";
     if (currentGame === "WildWorld") {
         ext = "m4a";
@@ -79,33 +83,41 @@ async function playSong(hour) {
     const fileName = `${hour}${suffix}.${ext}`
     console.log(`${dirName}/${fileName}`);
 
-    //let src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
-    //if (currentGame === "WildWorld") {
-    //    src = `https://ipfs.io/ipfs/QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
-    //}
-    const src = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
-    const response = await HeliaVerifiedFetch.verifiedFetch(src);
-    console.log(response);
-    const blob = await response.blob();
+    let src;
+    //src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
+    if (window.location.href.startsWith("file:")) {
+        src = `songs/${dirName}/${fileName}`;
+    } else {
+        const ipfsUrl = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
+        const response = await HeliaVerifiedFetch.verifiedFetch(ipfsUrl, {signal: abortController.signal});
+        console.log(response);
+        const blob = await response.blob();
+        console.log("Loaded blob from IPFS");
+        const blobUrl = URL.createObjectURL(blob);
+        abortController.signal.addEventListener("abort", () => {
+            URL.revokeObjectURL(blobUrl);
+        });
+        src = blobUrl;
+    }
 
-    player.src = URL.createObjectURL(blob);
-    //player.src = `songs/${dirName}/${fileName}`;
-    player.volume = 0;
-    player.loop = true;
-    document.body.append(player);
+    audio.abortController = abortController;
+    audio.src = src;
+    audio.volume = 0;
+    audio.loop = true;
+    document.body.append(audio);
 
-    player.play();
+    audio.play();
 
     // synchronize the playback to the current second of hour
     let lastSync = 0;
-    player.addEventListener("playing", () => {
+    audio.addEventListener("playing", () => {
         const seconds = Date.now() / 1000;
         if (seconds - lastSync > 10) {
             const secondOfHour = (seconds - latency) % 3600;
-            const secondOffset = secondOfHour % player.duration;
+            const secondOffset = secondOfHour % audio.duration;
             console.log("Second offset: " + secondOffset);
             lastSync = seconds;
-            player.currentTime = secondOffset;
+            audio.currentTime = secondOffset;
         }
     });
 
