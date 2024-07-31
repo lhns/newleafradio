@@ -34,7 +34,7 @@ async function playRadio() {
     console.log("Audio latency: " + latency + "s");
 
     console.log("playing song...");
-    playSong(now.getHours());
+    await playSong(now.getHours());
 
     timer = setTimeout(function () {
         if (!coffeeBreakFlag) {
@@ -57,7 +57,7 @@ function stopRadio() {
     }
 }
 
-function playSong(hour) {
+async function playSong(hour) {
     const prefix = filePathPrefix;
     const suffix = (hour >= 12) ? 'PM' : 'AM';
     hour = (hour > 12) ? hour - 12 : hour;
