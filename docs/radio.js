@@ -86,9 +86,9 @@ async function loadSong(game, weather, hour24, signal) {
             });
             return blobUrl;
         } catch (error) {
-            console.error("Error loading blob from IPFS");
-            console.error(error);
             if (!signal.aborted) {
+                console.error("Error loading blob from IPFS");
+                console.error(error);
                 await new Promise(r => setTimeout(r, 1000));
                 return await loadSong(game, weather, hour24, signal);
             }
@@ -116,8 +116,6 @@ async function playSong(hour) {
     lastAbortController?.abort();
 
     if (!signal.aborted) {
-        //document.querySelector('audio')?.remove();
-
         const audio = document.createElement('audio');
         audio.id = `current-song`
         audio.src = src;
