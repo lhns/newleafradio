@@ -34,11 +34,11 @@ async function playRadio() {
     console.log("Audio latency: " + latency + "s");
 
     console.log("playing song...");
-    await playSong(now.getHours());
+    const audio = await playSong(now.getHours());
 
     timer = setTimeout(function () {
         if (!coffeeBreakFlag) {
-            fadeOut();
+            fadeOut(audio);
         }
     }, timeToElapse);
 }
@@ -132,19 +132,20 @@ async function playSong(hour) {
         }
     });
 
-    fadeIn();
+    fadeIn(audio);
+    return audio;
 }
 
-function fadeOut() {
+function fadeOut(audio) {
     console.log('swapping songs');
     if (!fadeOutTimer) {
         fadeOutTimer = setInterval(function () {
             if (!coffeeBreakFlag) {
-                let currentVolume = $('#current-song')[0].volume;
+                let currentVolume = audio.volume;
                 if (currentVolume - .1 > 0) {
-                    $('#current-song')[0].volume -= .1;
+                    audio.volume -= .1;
                 } else {
-                    $('#current-song')[0].volume = 0;
+                    audio.volume = 0;
                     clearInterval(fadeOutTimer);
                     fadeOutTimer = null;
                     playRadio();
@@ -154,7 +155,7 @@ function fadeOut() {
     }
 }
 
-function fadeIn() {
+function fadeIn(audio) {
     if (!fadeInTimer) {
         fadeInTimer = setInterval(function () {
             if (fadeOutTimer) {
@@ -162,11 +163,11 @@ function fadeIn() {
                 fadeInTimer = null;
             }
             if (!coffeeBreakFlag) {
-                const currentVolume = $('#current-song')[0].volume;
+                const currentVolume = audio.volume;
                 if (currentVolume + .1 < maxVolume) {
-                    $('#current-song')[0].volume += .1
+                    audio.volume += .1
                 } else {
-                    $('#current-song')[0].volume = maxVolume;
+                    audio.volume = maxVolume;
                     clearInterval(fadeInTimer);
                     fadeInTimer = null;
                 }
@@ -311,7 +312,8 @@ function slideVolume(volume) {
     clearInterval(fadeInTimer);
     fadeInTimer = 0;
     maxVolume = volume.value / 100;
-    if ($('#current-song')[0]) {
-        $('#current-song')[0].volume = maxVolume;
+    const audio = $('#current-song')[0];
+    if (audio) {
+        audio.volume = maxVolume;
     }
 }
