@@ -177,7 +177,7 @@ function swapButtons() {
 }
 
 function setLoading(loading) {
-    $('#loading')[0].style.display = loading ? "block" : "none";
+    $('#loading')[0].style.display = loading ? "inline" : "none";
 }
 
 function weatherChanged(selected) {
