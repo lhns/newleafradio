@@ -10,7 +10,7 @@ let filePathPrefix = "Normal";
 let currentGame = "NewLeaf";
 let maxVolume = 1;
 let latency = 0;
-let currentAbortController;
+let currentAbortControllers = [];
 const audioContext = new AudioContext();
 
 async function playRadio() {
@@ -41,6 +41,18 @@ async function playRadio() {
     }, timeToElapse);
 }
 
+function abortOld(reason, except) {
+    let newAbortControllers = [];
+    for (const abortController of currentAbortControllers) {
+        if (abortController === except) {
+            newAbortControllers = newAbortControllers.concat([abortController]);
+        } else {
+            abortController.abort(reason);
+        }
+    }
+    currentAbortControllers = newAbortControllers;
+}
+
 function stopRadio() {
     coffeeBreakFlag = true;
     clearInterval(fadeOutTimer);
@@ -48,9 +60,7 @@ function stopRadio() {
     clearInterval(fadeInTimer);
     fadeInTimer = null;
     clearTimeout(timer);
-
-    currentAbortController?.abort("stop playback");
-    currentAbortController = null;
+    abortOld("stop playback", null);
 }
 
 async function loadSong(game, weather, hour24, signal) {
@@ -102,15 +112,14 @@ function syncAudio(audio, nowSeconds, latency) {
 
 async function playSong(hour) {
     const abortController = new AbortController();
-    const lastAbortController = currentAbortController;
-    currentAbortController = abortController;
+    currentAbortControllers = currentAbortControllers.concat([abortController]);
     const signal = abortController.signal;
 
     setLoading(true);
     const src = await loadSong(currentGame, filePathPrefix, hour, signal);
     setLoading(false);
 
-    lastAbortController?.abort("stop playback");
+    abortOld("stop playback", abortController);
 
     if (!signal.aborted) {
         const audio = document.createElement('audio');
