@@ -96,17 +96,17 @@ async function playSong(hour) {
                 console.log(response);
                 const blob = await response.blob();
                 console.log("Loaded blob from IPFS");
+                const blobUrl = URL.createObjectURL(blob);
+                abortController.signal.addEventListener("abort", () => {
+                    URL.revokeObjectURL(blobUrl);
+                });
+                src = blobUrl;
             } catch (error) {
                 console.error(error);
                 if (!abortController.signal.aborted) {
                     await new Promise(r => setTimeout(r, 2000));
                 }
             }
-            const blobUrl = URL.createObjectURL(blob);
-            abortController.signal.addEventListener("abort", () => {
-                URL.revokeObjectURL(blobUrl);
-            });
-            src = blobUrl;
         }
     }
     setLoading(false);
