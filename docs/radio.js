@@ -11,6 +11,7 @@ let currentGame = "NewLeaf";
 let maxVolume = 1;
 let latency = 0;
 let currentAbortController;
+const audioContext = new AudioContext();
 
 async function playRadio() {
     coffeeBreakFlag = false;
@@ -29,10 +30,6 @@ async function playRadio() {
     if (checkWeatherFlag) {
         await updateCurrentWeather();
     }
-
-    const audioCtx = new AudioContext();
-    latency = audioCtx.outputLatency;
-    console.log("Audio latency: " + latency + "s");
 
     console.log("playing song...");
     const audio = await playSong(now.getHours());
@@ -96,8 +93,8 @@ async function loadSong(game, weather, hour24, signal) {
     }
 }
 
-function syncAudio(audio, nowSeconds) {
-    const secondOfHour = nowSeconds % 3600;
+function syncAudio(audio, nowSeconds, latency) {
+    const secondOfHour = (nowSeconds - latency) % 3600;
     const secondOffset = secondOfHour % audio.duration;
     audio.currentTime = secondOffset;
     return secondOffset
@@ -117,7 +114,7 @@ async function playSong(hour) {
 
     if (!signal.aborted) {
         const audio = document.createElement('audio');
-        audio.id = `current-song`
+        audio.id = 'current-song'
         audio.src = src;
         audio.volume = 0;
         audio.loop = true;
@@ -128,12 +125,13 @@ async function playSong(hour) {
 
         // synchronize the playback to the current second of hour
         let lastSync = 0;
-        audio.addEventListener("playing", () => {
+        audio.addEventListener('playing', () => {
             const nowSeconds = Date.now() / 1000;
             if (nowSeconds - lastSync > 10) {
                 lastSync = nowSeconds;
-                const secondOffset = syncAudio(audio, nowSeconds - latency);
-                console.log("Second offset: " + secondOffset);
+                const latency = audioContext.outputLatency;
+                const secondOffset = syncAudio(audio, nowSeconds, latency);
+                console.log("Track offset: " + secondOffset + "s (audio latency: " + latency + "s)");
             }
         });
 
