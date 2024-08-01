@@ -89,8 +89,8 @@ async function playSong(hour) {
     if (window.location.href.startsWith("file:")) {
         src = `songs/${dirName}/${fileName}`;
     } else {
+        const ipfsUrl = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
         while (!src && !abortController.signal.aborted) {
-            const ipfsUrl = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
             try {
                 const response = await HeliaVerifiedFetch.verifiedFetch(ipfsUrl, {signal: abortController.signal});
                 console.log(response);
