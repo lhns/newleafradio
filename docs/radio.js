@@ -89,16 +89,25 @@ async function playSong(hour) {
     if (window.location.href.startsWith("file:")) {
         src = `songs/${dirName}/${fileName}`;
     } else {
-        const ipfsUrl = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
-        const response = await HeliaVerifiedFetch.verifiedFetch(ipfsUrl, {signal: abortController.signal});
-        console.log(response);
-        const blob = await response.blob();
-        console.log("Loaded blob from IPFS");
-        const blobUrl = URL.createObjectURL(blob);
-        abortController.signal.addEventListener("abort", () => {
-            URL.revokeObjectURL(blobUrl);
-        });
-        src = blobUrl;
+        while (!src && !abortController.signal.aborted) {
+            const ipfsUrl = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
+            try {
+                const response = await HeliaVerifiedFetch.verifiedFetch(ipfsUrl, {signal: abortController.signal});
+                console.log(response);
+                const blob = await response.blob();
+                console.log("Loaded blob from IPFS");
+            } catch (error) {
+                console.error(error);
+                if (!abortController.signal.aborted) {
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
+            const blobUrl = URL.createObjectURL(blob);
+            abortController.signal.addEventListener("abort", () => {
+                URL.revokeObjectURL(blobUrl);
+            });
+            src = blobUrl;
+        }
     }
     setLoading(false);
 
