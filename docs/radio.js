@@ -1,15 +1,16 @@
-var intervalNotSet = true;
-var timer;
-var fadeOutTimer;
-var fadeInTimer;
-var coffeeBreakFlag = true;
-var checkWeatherFlag = false;
-var lat = 0;
-var lng = 0;
-var filePathPrefix = "Normal";
-var currentGame = "NewLeaf";
-var maxVolume = 1;
-var latency = 0;
+let intervalNotSet = true;
+let timer;
+let fadeOutTimer;
+let fadeInTimer;
+let coffeeBreakFlag = true;
+let checkWeatherFlag = false;
+let lat = 0;
+let lng = 0;
+let filePathPrefix = "Normal";
+let currentGame = "NewLeaf";
+let maxVolume = 1;
+let latency = 0;
+let currentAbortController;
 
 async function playRadio() {
     coffeeBreakFlag = false;
@@ -38,7 +39,7 @@ async function playRadio() {
 
     timer = setTimeout(function () {
         if (!coffeeBreakFlag) {
-            fadeOut(audio);
+            fadeOut();
         }
     }, timeToElapse);
 }
@@ -51,96 +52,106 @@ function stopRadio() {
     fadeInTimer = null;
     clearTimeout(timer);
 
-    const oldAudio = document.querySelector('audio');
-    if (oldAudio) {
-        oldAudio.abortController?.abort();
-        oldAudio.remove();
-    }
+    currentAbortController?.abort();
+    currentAbortController = null;
 }
 
-async function playSong(hour) {
-    const prefix = filePathPrefix;
-    const suffix = (hour >= 12) ? 'PM' : 'AM';
-    hour = (hour > 12) ? hour - 12 : hour;
-    hour = (hour == 0) ? 12 : hour;
+async function loadSong(game, weather, hour24, signal) {
+    const hour12Suffix = (hour24 >= 12) ? 'PM' : 'AM';
+    let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
+    hour12 = (hour12 == 0) ? 12 : hour12;
 
-
-    const oldAudio = document.querySelector('audio');
-    if (oldAudio) {
-        oldAudio.abortController?.abort();
-        oldAudio.remove();
-    }
-
-    const audio = document.createElement('audio');
-    audio.id = `current-song`
-
-    const abortController = new AbortController();
     let ext = "mp3";
     if (currentGame === "WildWorld") {
         ext = "m4a";
     }
-    const dirName = `${prefix}${currentGame}`;
-    const fileName = `${hour}${suffix}.${ext}`
-    console.log(`${dirName}/${fileName}`);
 
-    setLoading(true);
-    let src;
-    //src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
+    const dirName = `${weather}${game}`;
+    const fileName = `${hour12}${hour12Suffix}.${ext}`
+    console.log(`Loading ${dirName}/${fileName}`);
+
     if (window.location.href.startsWith("file:")) {
-        src = `songs/${dirName}/${fileName}`;
+        return `songs/${dirName}/${fileName}`;
     } else {
         const ipfsUrl = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
-        while (!src && !abortController.signal.aborted) {
-            try {
-                const response = await HeliaVerifiedFetch.verifiedFetch(ipfsUrl, {signal: abortController.signal});
-                console.log(response);
-                const blob = await response.blob();
-                console.log("Loaded blob from IPFS");
-                const blobUrl = URL.createObjectURL(blob);
-                abortController.signal.addEventListener("abort", () => {
-                    URL.revokeObjectURL(blobUrl);
-                });
-                src = blobUrl;
-            } catch (error) {
-                console.error(error);
-                if (!abortController.signal.aborted) {
-                    await new Promise(r => setTimeout(r, 2000));
-                }
+        try {
+            console.log("Loading blob from IPFS...")
+            const response = await HeliaVerifiedFetch.verifiedFetch(ipfsUrl, {signal: signal});
+            console.log(response);
+            const blob = await response.blob();
+            console.log("Loaded blob from IPFS");
+            const blobUrl = URL.createObjectURL(blob);
+            signal.addEventListener("abort", () => {
+                URL.revokeObjectURL(blobUrl);
+            });
+            return blobUrl;
+        } catch (error) {
+            console.error("Error loading blob from IPFS");
+            console.error(error);
+            if (!signal.aborted) {
+                await new Promise(r => setTimeout(r, 1000));
+                return await loadSong(game, weather, hour24, signal);
             }
         }
     }
-    setLoading(false);
-
-    audio.abortController = abortController;
-    audio.src = src;
-    audio.volume = 0;
-    audio.loop = true;
-    document.body.append(audio);
-
-    audio.play();
-
-    // synchronize the playback to the current second of hour
-    let lastSync = 0;
-    audio.addEventListener("playing", () => {
-        const seconds = Date.now() / 1000;
-        if (seconds - lastSync > 10) {
-            const secondOfHour = (seconds - latency) % 3600;
-            const secondOffset = secondOfHour % audio.duration;
-            console.log("Second offset: " + secondOffset);
-            lastSync = seconds;
-            audio.currentTime = secondOffset;
-        }
-    });
-
-    fadeIn(audio);
-    return audio;
 }
 
-function fadeOut(audio) {
+function syncAudio(audio, nowSeconds) {
+    const secondOfHour = nowSeconds % 3600;
+    const secondOffset = secondOfHour % audio.duration;
+    audio.currentTime = secondOffset;
+    return secondOffset
+}
+
+async function playSong(hour) {
+    const abortController = new AbortController();
+    const lastAbortController = currentAbortController;
+    currentAbortController = abortController;
+    const signal = abortController.signal;
+
+    setLoading(true);
+    const src = await loadSong(currentGame, filePathPrefix, hour, signal);
+    setLoading(false);
+
+    lastAbortController?.abort();
+
+    if (!signal.aborted) {
+        //document.querySelector('audio')?.remove();
+
+        const audio = document.createElement('audio');
+        audio.id = `current-song`
+        audio.src = src;
+        audio.volume = 0;
+        audio.loop = true;
+        document.body.append(audio);
+        signal.addEventListener('abort', () => {
+            audio.remove();
+        });
+
+        // synchronize the playback to the current second of hour
+        let lastSync = 0;
+        audio.addEventListener("playing", () => {
+            const nowSeconds = Date.now() / 1000;
+            if (nowSeconds - lastSync > 10) {
+                lastSync = nowSeconds;
+                const secondOffset = syncAudio(audio, nowSeconds - latency);
+                console.log("Second offset: " + secondOffset);
+            }
+        });
+
+        audio.play();
+        fadeIn();
+
+        return audio;
+    }
+}
+
+function fadeOut() {
     console.log('swapping songs');
     if (!fadeOutTimer) {
         fadeOutTimer = setInterval(function () {
-            if (!coffeeBreakFlag) {
+            const audio = $('#current-song')[0];
+            if (audio && !coffeeBreakFlag) {
                 let currentVolume = audio.volume;
                 if (currentVolume - .1 > 0) {
                     audio.volume -= .1;
@@ -155,14 +166,15 @@ function fadeOut(audio) {
     }
 }
 
-function fadeIn(audio) {
+function fadeIn() {
     if (!fadeInTimer) {
         fadeInTimer = setInterval(function () {
             if (fadeOutTimer) {
                 clearInterval(fadeInTimer);
                 fadeInTimer = null;
             }
-            if (!coffeeBreakFlag) {
+            const audio = $('#current-song')[0];
+            if (audio && !coffeeBreakFlag) {
                 const currentVolume = audio.volume;
                 if (currentVolume + .1 < maxVolume) {
                     audio.volume += .1
