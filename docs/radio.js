@@ -49,7 +49,7 @@ function stopRadio() {
     fadeInTimer = null;
     clearTimeout(timer);
 
-    currentAbortController?.abort();
+    currentAbortController?.abort("stop playback");
     currentAbortController = null;
 }
 
@@ -110,7 +110,7 @@ async function playSong(hour) {
     const src = await loadSong(currentGame, filePathPrefix, hour, signal);
     setLoading(false);
 
-    lastAbortController?.abort();
+    lastAbortController?.abort("stop playback");
 
     if (!signal.aborted) {
         const audio = document.createElement('audio');
