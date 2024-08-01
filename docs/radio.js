@@ -83,6 +83,7 @@ async function playSong(hour) {
     const fileName = `${hour}${suffix}.${ext}`
     console.log(`${dirName}/${fileName}`);
 
+    setLoading(true);
     let src;
     //src = `https://cdn.glitch.me/a032b7da-b36c-4292-9322-7d4c98be233b%2F${dirName}_${fileName}`;
     if (window.location.href.startsWith("file:")) {
@@ -99,6 +100,7 @@ async function playSong(hour) {
         });
         src = blobUrl;
     }
+    setLoading(false);
 
     audio.abortController = abortController;
     audio.src = src;
@@ -172,6 +174,10 @@ function swapButtons() {
         $('#stop')[0].style.display = "none";
         $('#start')[0].style.display = "block";
     }
+}
+
+function setLoading(loading) {
+    $('#loading')[0].style.display = loading ? "block" : "none";
 }
 
 function weatherChanged(selected) {
