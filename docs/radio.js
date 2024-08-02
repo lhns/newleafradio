@@ -207,20 +207,20 @@ function setLoading(loading) {
     $('#loading')[0].style.display = loading ? "inline" : "none";
 }
 
-function weatherChanged(selected) {
+async function weatherChanged(selected) {
     if (selected.id == "none") {
         $('#custom-weather-sub')[0].style.display = "none";
         checkWeatherFlag = false;
         filePathPrefix = "Normal";
         if (!coffeeBreakFlag) {
-            playRadio();
+            await playRadio();
         }
     } else if (selected.id == "custom") {
         checkWeatherFlag = false;
         $('#custom-weather-sub')[0].style.display = "block";
         filePathPrefix = $('#custom-weather-sub').find('.active')[0].id;
         if (!coffeeBreakFlag) {
-            playRadio();
+            await playRadio();
         }
     } else if (selected.id == "dynamic") {
         checkWeatherFlag = true;
@@ -231,9 +231,10 @@ function weatherChanged(selected) {
                 lng = pos.coords.longitude;
                 try {
                     if (!coffeeBreakFlag) {
-                        playRadio();
+                        await playRadio();
                     }
-                } catch {
+                } catch (error) {
+                    console.error(error);
                     showModal();
                 }
             });
@@ -241,18 +242,18 @@ function weatherChanged(selected) {
     }
 }
 
-function customWeatherRequest(selected) {
+async function customWeatherRequest(selected) {
     filePathPrefix = selected.id;
     if (!coffeeBreakFlag) {
-        playRadio();
+        await playRadio();
     }
 }
 
-function setGame(selected) {
+async function setGame(selected) {
     currentGame = selected.value;
     console.log(currentGame);
     if (!coffeeBreakFlag) {
-        playRadio();
+        await playRadio();
     }
 }
 
@@ -306,7 +307,7 @@ async function updateCurrentWeather() {
     filePathPrefix = precipitation;
 }
 
-function shrinkModal() {
+async function shrinkModal() {
     $(".modal")[0].style.display = "none";
     const weatherOptions = $('#weather-options');
     const currentSelection = weatherOptions.find('.active');
@@ -317,7 +318,7 @@ function shrinkModal() {
 
     filePathPrefix = 'Normal';
     if (!coffeeBreakFlag) {
-        playRadio();
+        await playRadio();
     }
 }
 

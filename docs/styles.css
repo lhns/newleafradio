@@ -89,6 +89,10 @@ a:hover {
     border: none;
 }
 
+.modal-title {
+    flex-grow: 1;
+}
+
 .modal-body {
     background-color: burlywood;
     border: none;
