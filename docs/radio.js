@@ -12,9 +12,7 @@ let maxVolume = 1;
 let latency = 0;
 let currentAbortControllers = [];
 const audioContext = new AudioContext();
-const asyncVerifiedFetch = HeliaVerifiedFetch.createVerifiedFetch({
-    gateways: ['https://trustless-gateway.link', 'https://ipfs.lhns.de']
-});
+const asyncVerifiedFetch = HeliaVerifiedFetch.createVerifiedFetch();
 
 async function playRadio() {
     coffeeBreakFlag = false;
