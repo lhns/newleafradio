@@ -12,6 +12,9 @@ let maxVolume = 1;
 let latency = 0;
 let currentAbortControllers = [];
 const audioContext = new AudioContext();
+const asyncVerifiedFetch = HeliaVerifiedFetch.createVerifiedFetch({
+    gateways: ['https://trustless-gateway.link', 'https://ipfs.lhns.de']
+});
 
 async function playRadio() {
     coffeeBreakFlag = false;
@@ -63,6 +66,22 @@ function stopRadio() {
     abortOld("stop playback", null);
 }
 
+async function fetchIpfsBlob(ipfsUrl, signal) {
+    try {
+        const verifiedFetch = await asyncVerifiedFetch;
+        const response = await verifiedFetch(ipfsUrl, {signal: signal});
+        console.log(response);
+        return await response.blob();
+    } catch (error) {
+        if (!signal.aborted) {
+            console.error("Error loading blob from IPFS. Retrying...");
+            console.error(error);
+            await new Promise(r => setTimeout(r, 1000));
+            return await fetchIpfs(ipfsUrl);
+        }
+    }
+}
+
 async function loadSong(game, weather, hour24, signal) {
     const hour12Suffix = (hour24 >= 12) ? 'PM' : 'AM';
     let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
@@ -81,25 +100,14 @@ async function loadSong(game, weather, hour24, signal) {
         return `songs/${dirName}/${fileName}`;
     } else {
         const ipfsUrl = `ipfs://QmU8r6FoSr6YLaNCSn1yYVXoAcrEoM5pLNCYVqx8tCXFhA/${dirName}/${fileName}`;
-        try {
-            console.log("Loading blob from IPFS...")
-            const response = await HeliaVerifiedFetch.verifiedFetch(ipfsUrl, {signal: signal});
-            console.log(response);
-            const blob = await response.blob();
-            console.log("Loaded blob from IPFS");
-            const blobUrl = URL.createObjectURL(blob);
-            signal.addEventListener("abort", () => {
-                URL.revokeObjectURL(blobUrl);
-            });
-            return blobUrl;
-        } catch (error) {
-            if (!signal.aborted) {
-                console.error("Error loading blob from IPFS");
-                console.error(error);
-                await new Promise(r => setTimeout(r, 1000));
-                return await loadSong(game, weather, hour24, signal);
-            }
-        }
+        console.log("Loading blob from IPFS...");
+        const blob = await fetchIpfsBlob(ipfsUrl);
+        console.log("Loaded blob from IPFS");
+        const blobUrl = URL.createObjectURL(blob, signal);
+        signal.addEventListener("abort", () => {
+            URL.revokeObjectURL(blobUrl);
+        });
+        return blobUrl;
     }
 }
 
