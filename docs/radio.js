@@ -13,7 +13,7 @@ let latency = 0;
 let currentAbortControllers = [];
 const audioContext = new AudioContext();
 const asyncVerifiedFetch = HeliaVerifiedFetch.createVerifiedFetch({
-    gateways: ['https://ipfs.lhns.de', 'https://trustless-gateway.link']
+    gateways: ['https://ipfs.lhns.de'/*, 'https://trustless-gateway.link'*/]
 });
 
 async function playRadio() {
