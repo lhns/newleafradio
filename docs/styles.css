@@ -17,24 +17,31 @@ h1.titlecard {
     font-weight: bold;
     background-color: maroon;
     color: burlywood;
+    text-decoration-color: burlywood;
     text-align: center;
     border-radius: 5px;
 }
 
-h3 {
-    font-weight: bold;
+h1.titlecard a {
+    --bs-link-color-rgb: 222, 184, 135; # burlywood
+    --bs-link-hover-color-rgb: 222, 184, 135; # burlywood
 }
 
 .body {
     color: #3a3a3a;
 }
 
-button {
-    margin-left: auto!important;
-    margin-right: auto!important;
-    background-color: maroon!important;
-    color: burlywood!important;
-    font-weight: bold!important;
+.btn-secondary {
+    --bs-btn-color: burlywood;
+    --bs-btn-bg: maroon;
+    --bs-btn-border-color: maroon;
+    --bs-btn-hover-color: burlywood;
+    --bs-btn-hover-bg: maroon;
+    --bs-btn-hover-border-color: maroon;
+    --bs-btn-active-color: maroon;
+    --bs-btn-active-bg: burlywood;
+    --bs-btn-active-border-color: burlywood;
+    --bs-btn-font-weight: 700;
 }
 
 a {
@@ -42,35 +49,9 @@ a {
     overflow-wrap: break-word;
 }
 
-a:hover {
-    color: maroon;
-    text-decoration: none;
-}
-
-.btn-secondary {
-    background-color: maroon;
-    color: burlywood;
-    font-weight: bold;
-    border: none!important;
-}
-
-.btn-secondary.active {
-    border: none!important;
-    background-color: burlywood!important;
-    color: maroon!important;
-}
-
-.btn-secondary.focus {
-    border: none!important;
-    background-color: burlywood!important;
-    color: maroon!important;
-    box-shadow: none;
-}
-
-.btn-secondary:hover {
-    border: none!important;
-    background-color: burlywood!important;
-    color: maroon!important;
+h1>a {
+    color: inherit;
+    text-decoration-color: inherit;
 }
 
 .error-popup {
@@ -100,9 +81,9 @@ a:hover {
 
 .slidecontainer {
     width: 100%;
-  }
-  
-  .slider {
+}
+
+.slider {
     -webkit-appearance: none;
     width: 100%;
     height: 15px;
@@ -112,13 +93,13 @@ a:hover {
     opacity: 0.7;
     -webkit-transition: .2s;
     transition: opacity .2s;
-  }
-  
-  .slider:hover {
+}
+
+.slider:hover {
     opacity: 1;
-  }
-  
-  .slider::-webkit-slider-thumb {
+}
+
+.slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
     width: 25px;
@@ -126,15 +107,15 @@ a:hover {
     border-radius: 50%;
     background: maroon;
     cursor: pointer;
-  }
-  
-  .slider::-moz-range-thumb {
+}
+
+.slider::-moz-range-thumb {
     width: 25px;
     height: 25px;
     border-radius: 50%;
     background: #4CAF50;
     cursor: pointer;
-  }
+}
 
 .btn-group {
   flex-wrap: wrap;

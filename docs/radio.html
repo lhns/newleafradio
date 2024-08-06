@@ -5,7 +5,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=yes">
         <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
         <script src="https://unpkg.com/@helia/verified-fetch/dist/index.min.js"></script>
-        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="" crossorigin="anonymous">
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
         <link rel="stylesheet" href="styles.css">
         <title>New Leaf Radio</title>
         <link rel="icon" href="favicon.ico" type="image/x-icon"/>
@@ -14,11 +14,11 @@
         <div class="main container-fluid">
             <div class="main row pt-4 pb-4 justify-content-center">
                 <div class="blog-body col-10 col-lg-8">
-                    <h1 class="w-100 titlecard">New Leaf Radio</h1>
+                    <h1 class="w-100 titlecard"><a href="." class="link-underline link-underline-opacity-0 link-underline-opacity-100-hover">New Leaf Radio</a></h1>
                     <div class="body container-fluid p-4">
                         <div class="row">
                             <div class="col-12 col-md-6 mb-3">
-                                <h3>
+                                <h3 class="fw-bold">
                                     Start listening now!
                                 </h3>
                                 <p>
@@ -28,50 +28,43 @@
                                     This is a young project and we want to make it the best we can. Dynamic weather can be tricky and all the controls are more or 
                                     less from scratch. If you see something that isn't working right let me know on <a target="_blank" href="https://github.com/lhns/newleafradio/issues">GitHub</a>.
                                 </p>
-                                <button onclick="playRadio(); swapButtons()" id="start" type="button" class="btn btn-block btn-lg" style="display: block">Crank those tunes</button>
-                                <button onclick="stopRadio(); swapButtons()" id="stop" type="button" class="btn btn-block btn-lg" style="display: none"><span id="loading">(Loading) </span>Coffee break time</button>
+                                <div class="d-grid gap-2 mb-4">
+                                    <button onclick="playRadio(); swapButtons()" id="start" type="button" class="btn btn-secondary btn-lg" style="display: block">Crank those tunes</button>
+                                    <button onclick="stopRadio(); swapButtons()" id="stop" type="button" class="btn btn-secondary btn-lg" style="display: none"><span id="loading">(Loading) </span>Coffee break time</button>
+                                </div>
 
                                 <h4 class="mt-4 mb-1">Weather</h4>
 
-                                <div id="weather-options" class="btn-group btn-group-toggle mb-2" data-toggle="buttons">
-                                    <label class="btn btn-secondary active">
-                                        <input onchange="weatherChanged(this)" type="radio" name="options" id="none" autocomplete="off" checked> None
-                                    </label>
-                                    <label class="btn btn-secondary">
-                                        <input onchange="weatherChanged(this)" type="radio" name="options" id="custom" autocomplete="off"> Custom
-                                    </label>
-                                    <label class="btn btn-secondary">
-                                        <input onchange="weatherChanged(this)" type="radio" name="options" id="dynamic" autocomplete="off"> Dynamic
-                                    </label>
+                                <div id="weather-options" class="btn-group btn-group-toggle mb-2" role="group" data-toggle="buttons">
+                                    <input class="btn-check" onchange="weatherChanged(this)" type="radio" name="weather" id="none" autocomplete="off" checked>
+                                    <label class="btn btn-secondary" for="none">None</label>
+                                    <input class="btn-check" onchange="weatherChanged(this)" type="radio" name="weather" id="custom" autocomplete="off">
+                                    <label class="btn btn-secondary" for="custom">Custom</label>
+                                    <input class="btn-check" onchange="weatherChanged(this)" type="radio" name="weather" id="dynamic" autocomplete="off">
+                                    <label class="btn btn-secondary" for="dynamic">Dynamic</label>
                                 </div>
 
                                 <div id="custom-weather-sub" style="display: none">
                                     <h5 class="mt-4 mb-1">Custom Weather</h5>
-                                    <div class="btn-group btn-group-toggle mb-2" data-toggle="buttons">
-                                        <label class="btn btn-secondary active" id="Normal">
-                                            <input onchange="customWeatherRequest(this)" type="radio" name="options" id="Normal" autocomplete="off" checked> Clear Skies
-                                        </label>
-                                        <label class="btn btn-secondary" id="Rain">
-                                            <input onchange="customWeatherRequest(this)" type="radio" name="options" id="Rain" autocomplete="off"> Raining
-                                        </label>
-                                        <label class="btn btn-secondary" id="Snow">
-                                            <input onchange="customWeatherRequest(this)" type="radio" name="options" id="Snow" autocomplete="off"> Snowing
-                                        </label>
+                                    <div class="btn-group btn-group-toggle mb-2" role="group" data-toggle="buttons">
+                                        <input class="btn-check" onchange="customWeatherRequest(this)" type="radio" name="custom-weather" id="Normal" autocomplete="off" checked>
+                                        <label class="btn btn-secondary" for="Normal">Clear Skies</label>
+                                        <input class="btn-check" onchange="customWeatherRequest(this)" type="radio" name="custom-weather" id="Rain" autocomplete="off">
+                                        <label class="btn btn-secondary" for="Rain">Raining</label>
+                                        <input class="btn-check" onchange="customWeatherRequest(this)" type="radio" name="custom-weather" id="Snow" autocomplete="off">
+                                        <label class="btn btn-secondary" for="Snow">Snowing</label>
                                     </div>
                                 </div>
 
                                 <div id="custom-game-sub">
                                     <h4 class="mt-4 mb-1">Soundtrack</h5>
-                                    <div class="btn-group btn-group-toggle mb-2" data-toggle="buttons">
-                                        <label class="btn btn-secondary" id="WildWorld">
-                                            <input onchange="setGame(this)" type="radio" name="options" value="WildWorld" autocomplete="off" checked>Wild World
-                                        </label>
-                                        <label class="btn btn-secondary" id="NewLeaf">
-                                            <input onchange="setGame(this)" type="radio" name="options" value="NewLeaf" autocomplete="off" checked>New Leaf
-                                        </label>
-                                        <label class="btn btn-secondary active" id="NewHorizons">
-                                            <input onchange="setGame(this)" type="radio" name="options" value="NewHorizons" autocomplete="off">New Horizons
-                                        </label>
+                                    <div class="btn-group btn-group-toggle mb-2" role="group" data-toggle="buttons">
+                                        <input class="btn-check" onchange="setGame(this)" type="radio" name="game" id="WildWorld" value="WildWorld" autocomplete="off">
+                                        <label class="btn btn-secondary" for="WildWorld">Wild World</label>
+                                        <input class="btn-check" onchange="setGame(this)" type="radio" name="game" id="NewLeaf" value="NewLeaf" autocomplete="off">
+                                        <label class="btn btn-secondary" for="NewLeaf">New Leaf</label>
+                                        <input class="btn-check" onchange="setGame(this)" type="radio" name="game" id="NewHorizons" value="NewHorizons" autocomplete="off" checked>
+                                        <label class="btn btn-secondary" for="NewHorizons">New Horizons</label>
                                     </div>
                                 </div>
 
@@ -79,8 +72,6 @@
                                     <h4 class="mt-4 mb-1">Volume</h5>
                                     <input type="range" min="1" max="100" value="100" class="slider" id="myRange" onchange="slideVolume(this)">
                                 </div>
-
-                                <a href="."><button type="button" class="btn btn-block btn-lg">Back to home</button></a>
                             </div>
                             <div style="text-align: center" class="col-12 col-md-6">
                                 <img class="d-md-block d-none w-100" src="radio_image.png">
@@ -123,7 +114,6 @@
         </div>
         <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="" crossorigin="anonymous"></script>
         <script src="radio.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="" crossorigin="anonymous"></script>
-        <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="" crossorigin="anonymous"></script>
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
     </body>
 </html>
