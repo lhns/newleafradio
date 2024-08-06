@@ -17,7 +17,7 @@
                     <h1 class="w-100 titlecard">New Leaf Radio</h1>
                     <div class="body container-fluid p-4">
                         <div class="row">
-                            <div class="col-12 col-md-6">
+                            <div class="col-12 col-md-6 mb-3">
                                 <h3>
                                     Start listening now!
                                 </h3>
@@ -32,8 +32,7 @@
                                 <button onclick="stopRadio(); swapButtons()" id="stop" type="button" class="btn btn-block btn-lg" style="display: none"><span id="loading">(Loading) </span>Coffee break time</button>
 
                                 <h4 class="mt-4 mb-1">Weather</h4>
-                              
-                              
+
                                 <div id="weather-options" class="btn-group btn-group-toggle mb-2" data-toggle="buttons">
                                     <label class="btn btn-secondary active">
                                         <input onchange="weatherChanged(this)" type="radio" name="options" id="none" autocomplete="off" checked> None
@@ -60,7 +59,7 @@
                                         </label>
                                     </div>
                                 </div>
-                              
+
                                 <div id="custom-game-sub">
                                     <h4 class="mt-4 mb-1">Soundtrack</h5>
                                     <div class="btn-group btn-group-toggle mb-2" data-toggle="buttons">
@@ -80,6 +79,8 @@
                                     <h4 class="mt-4 mb-1">Volume</h5>
                                     <input type="range" min="1" max="100" value="100" class="slider" id="myRange" onchange="slideVolume(this)">
                                 </div>
+
+                                <a href="."><button type="button" class="btn btn-block btn-lg">Back to home</button></a>
                             </div>
                             <div style="text-align: center" class="col-12 col-md-6">
                                 <img class="d-md-block d-none w-100" src="radio_image.png">
