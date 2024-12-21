@@ -157,8 +157,7 @@ async function fetchIpfsBlob(ipfsUrl, signal) {
         return body;
     } catch (error) {
         if (!signal.aborted) {
-            console.error("Error loading blob from IPFS. Retrying...");
-            console.error(error);
+            console.error("Error loading blob from IPFS. Retrying...", error);
             await new Promise(r => setTimeout(r, 1000));
             if (!signal.aborted) {
               return await fetchIpfsBlob(ipfsUrl, signal);
