@@ -66,24 +66,35 @@ function stopRadio() {
     abortOld("stop playback", null);
 }
 
-async function fetchIpfsBlob(ipfsUrl, signal) {
+async function fetchIpfsBlob(ipfsUrl, signal, onProgress) {
     try {
         const verifiedFetch = await asyncVerifiedFetch;
-        const response = await verifiedFetch(ipfsUrl, {signal: signal});
+        const response = await verifiedFetch(ipfsUrl, {
+            signal: signal,
+            onProgress: e => {
+                try {
+                    if (e?.detail?.totalBytes && onProgress) {
+                        onProgress(Number((e.detail.bytesRead || 0) * 1000n / e.detail.totalBytes) / 1000);
+                    }
+                } catch (error) {
+                    console.error(error);
+                }
+            }
+        });
         console.log(response);
         return await response.blob();
     } catch (error) {
-        if (!signal.aborted) {
+        if (!signal?.aborted) {
             console.error("Error loading blob from IPFS. Retrying...", error);
             await new Promise(r => setTimeout(r, 1000));
-            if (!signal.aborted) {
+            if (!signal?.aborted) {
               return await fetchIpfsBlob(ipfsUrl, signal);
             }
         }
     }
 }
 
-async function loadSong(game, weather, hour24, signal) {
+async function loadSong(game, weather, hour24, signal, onProgress) {
     const hour12Suffix = (hour24 >= 12) ? 'PM' : 'AM';
     let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
     hour12 = (hour12 == 0) ? 12 : hour12;
@@ -102,7 +113,7 @@ async function loadSong(game, weather, hour24, signal) {
     } else {
         const ipfsUrl = `ipfs://bafybeidq3jpqteqcirnnstx7pyrf4i2voaagrrhtaawlewvtv5heth5lqi/${dirName}/${fileName}`;
         console.log("Loading blob from IPFS...");
-        const blob = await fetchIpfsBlob(ipfsUrl);
+        const blob = await fetchIpfsBlob(ipfsUrl, signal, onProgress);
         console.log("Loaded blob from IPFS");
         const blobUrl = URL.createObjectURL(blob, signal);
         signal.addEventListener("abort", () => {
@@ -124,8 +135,10 @@ async function playSong(hour) {
     currentAbortControllers = currentAbortControllers.concat([abortController]);
     const signal = abortController.signal;
 
-    setLoading(true);
-    const src = await loadSong(currentGame, filePathPrefix, hour, signal);
+    setLoading("0%");
+    const src = await loadSong(currentGame, filePathPrefix, hour, signal, p => {
+        setLoading(Math.trunc(p * 100) + "%");
+    });
     setLoading(false);
 
     abortOld("stop playback", abortController);
@@ -212,8 +225,11 @@ function swapButtons() {
     }
 }
 
-function setLoading(loading) {
-    $('#loading')[0].style.display = loading ? "inline" : "none";
+function setLoading(text) {
+    const loading = !(text === null || text === false);
+    const elem = $('#loading')[0];
+    if (loading) elem.textContent = `(${text}) `;
+    elem.style.display = loading ? "inline" : "none";
 }
 
 async function weatherChanged(selected) {
