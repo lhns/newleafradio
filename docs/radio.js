@@ -31,6 +31,7 @@ async function playRadio() {
     console.log("Milliseconds before then: " + timeToElapse);
 
     if (checkWeatherFlag) {
+        // TODO: handle errors like in weatherChanged
         await updateCurrentWeather();
     }
 
@@ -243,7 +244,7 @@ async function weatherChanged(selected) {
     } else if (selected.id == "custom") {
         checkWeatherFlag = false;
         $('#custom-weather-sub')[0].style.display = "block";
-        filePathPrefix = $('#custom-weather-sub').find('.active')[0].id;
+        filePathPrefix = $('#custom-weather-sub').find(':checked')[0].id;
         if (!coffeeBreakFlag) {
             await playRadio();
         }
@@ -335,11 +336,10 @@ async function updateCurrentWeather() {
 async function shrinkModal() {
     $(".modal")[0].style.display = "none";
     const weatherOptions = $('#weather-options');
-    const currentSelection = weatherOptions.find('.active');
+    const currentSelection = weatherOptions.find(':checked');
     currentSelection.removeClass('active');
 
-    const newSelection = weatherOptions.find('#none').parent();
-    newSelection.addClass('active');
+    const newSelection = weatherOptions.find('#none').prop('checked', true);
 
     filePathPrefix = 'Normal';
     if (!coffeeBreakFlag) {
