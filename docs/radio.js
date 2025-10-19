@@ -1,4 +1,3 @@
-let intervalNotSet = true;
 let timer;
 let fadeOutTimer;
 let fadeInTimer;
@@ -9,12 +8,8 @@ let lng = 0;
 let filePathPrefix = "Normal";
 let currentGame = "NewHorizons";
 let maxVolume = 1;
-let latency = 0;
 let currentAbortControllers = [];
 const audioContext = new AudioContext();
-const asyncVerifiedFetch = HeliaVerifiedFetch.createVerifiedFetch({
-    gateways: ['https://trustless-gateway.link']
-});
 
 async function playRadio() {
     coffeeBreakFlag = false;
@@ -69,7 +64,8 @@ function stopRadio() {
 
 async function fetchIpfsBlob(ipfsUrl, signal, onProgress) {
     try {
-        const verifiedFetch = await asyncVerifiedFetch;
+        // verifiedFetch instance seems to break when its aborted, so its instantiated every time
+        const verifiedFetch = await HeliaVerifiedFetch.createVerifiedFetch({});
         const response = await verifiedFetch(ipfsUrl, {
             signal: signal,
             onProgress: e => {
@@ -89,7 +85,7 @@ async function fetchIpfsBlob(ipfsUrl, signal, onProgress) {
             console.error("Error loading blob from IPFS. Retrying...", error);
             await new Promise(r => setTimeout(r, 1000));
             if (!signal?.aborted) {
-              return await fetchIpfsBlob(ipfsUrl, signal);
+                return await fetchIpfsBlob(ipfsUrl, signal);
             }
         }
     }
@@ -98,7 +94,7 @@ async function fetchIpfsBlob(ipfsUrl, signal, onProgress) {
 async function loadSong(game, weather, hour24, signal, onProgress) {
     const hour12Suffix = (hour24 >= 12) ? 'PM' : 'AM';
     let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
-    hour12 = (hour12 == 0) ? 12 : hour12;
+    hour12 = (hour12 === 0) ? 12 : hour12;
 
     let ext = "mp3";
     if (currentGame === "WildWorld") {
@@ -217,7 +213,7 @@ function fadeIn() {
 }
 
 function swapButtons() {
-    if ($('#start')[0].style.display == "block") {
+    if ($('#start')[0].style.display === "block") {
         $('#start')[0].style.display = "none";
         $('#stop')[0].style.display = "block"
     } else {
@@ -234,21 +230,21 @@ function setLoading(text) {
 }
 
 async function weatherChanged(selected) {
-    if (selected.id == "none") {
+    if (selected.id === "none") {
         $('#custom-weather-sub')[0].style.display = "none";
         checkWeatherFlag = false;
         filePathPrefix = "Normal";
         if (!coffeeBreakFlag) {
             await playRadio();
         }
-    } else if (selected.id == "custom") {
+    } else if (selected.id === "custom") {
         checkWeatherFlag = false;
         $('#custom-weather-sub')[0].style.display = "block";
         filePathPrefix = $('#custom-weather-sub').find(':checked')[0].id;
         if (!coffeeBreakFlag) {
             await playRadio();
         }
-    } else if (selected.id == "dynamic") {
+    } else if (selected.id === "dynamic") {
         checkWeatherFlag = true;
         $('#custom-weather-sub')[0].style.display = "none";
         if (navigator.geolocation) {
