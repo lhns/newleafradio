@@ -1,5 +1,4 @@
 const IPFS_CID = "bafybeidq3jpqteqcirnnstx7pyrf4i2voaagrrhtaawlewvtv5heth5lqi";
-const VERIFIED_FETCH_URL = "https://unpkg.com/@helia/verified-fetch@8.1.2/dist/index.min.js";
 const FADE_STEP = 0.1;
 const FADE_INTERVAL_MS = 500;
 // the next song starts loading this long before the hour changes
@@ -22,6 +21,10 @@ let pendingSession = null;
 let currentSession = null;
 
 class WeatherError extends Error {
+}
+
+if (!window.location.href.startsWith("file:")) {
+    registerServiceWorker();
 }
 
 function onAbort(signal, callback) {
@@ -106,7 +109,7 @@ function abortSession(session) {
 async function startSession(startAt, options) {
     abortSession(pendingSession);
     const controller = new AbortController();
-    const session = {controller, signal: controller.signal, startAt, ...options, audio: null};
+    const session = {controller, signal: controller.signal, startAt, ...options, audio: null, streamingFailed: false};
     const signal = session.signal;
     pendingSession = session;
     onAbort(signal, () => {
@@ -160,7 +163,7 @@ async function loadAndPlay(session, signal) {
     }
 
     showProgress(session, "Loading");
-    const src = await loadSong(game, weather, hour, signal, p => {
+    const src = await loadSong(game, weather, hour, session, signal, p => {
         showProgress(session, Math.trunc(p * 100) + "%");
     });
 
@@ -286,7 +289,7 @@ function fadeTo(audio, getTarget, signal) {
     });
 }
 
-async function loadSong(game, weather, hour24, signal, onProgress) {
+async function loadSong(game, weather, hour24, session, signal, onProgress) {
     const hour12Suffix = (hour24 >= 12) ? 'PM' : 'AM';
     let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
     hour12 = (hour12 === 0) ? 12 : hour12;
@@ -299,93 +302,11 @@ async function loadSong(game, weather, hour24, signal, onProgress) {
         return `songs/${path}`;
     }
 
-    console.log("Loading blob from IPFS...");
-    const blob = await fetchIpfsBlob(`ipfs://${IPFS_CID}/${path}`, signal, onProgress);
-    console.log("Loaded blob from IPFS");
-    const blobUrl = URL.createObjectURL(blob);
-    onAbort(signal, () => URL.revokeObjectURL(blobUrl));
-    return blobUrl;
-}
-
-let verifiedFetchScript = null;
-let verifiedFetchPromise = null;
-
-function loadVerifiedFetchScript() {
-    if (!verifiedFetchScript) {
-        verifiedFetchScript = new Promise((resolve, reject) => {
-            const script = document.createElement("script");
-            script.src = VERIFIED_FETCH_URL;
-            script.onload = resolve;
-            script.onerror = () => {
-                script.remove();
-                verifiedFetchScript = null;
-                reject(new Error("Failed to load " + VERIFIED_FETCH_URL));
-            };
-            document.head.append(script);
-        });
-    }
-    return verifiedFetchScript;
-}
-
-function getVerifiedFetch() {
-    if (!verifiedFetchPromise) {
-        const promise = loadVerifiedFetchScript().then(() => HeliaVerifiedFetch.createVerifiedFetch({}));
-        promise.catch(() => {
-            if (verifiedFetchPromise === promise) verifiedFetchPromise = null;
-        });
-        verifiedFetchPromise = promise;
-    }
-    return verifiedFetchPromise;
-}
-
-async function resetVerifiedFetch(broken) {
-    if (verifiedFetchPromise !== broken) return;
-    verifiedFetchPromise = null;
-    try {
-        await (await broken).stop();
-    } catch (error) {
-        console.error(error);
-    }
-}
-
-async function fetchIpfsBlob(ipfsUrl, signal, onProgress) {
-    const verifiedFetchP = getVerifiedFetch();
-    let response;
-    try {
-        const verifiedFetch = await verifiedFetchP;
-        signal.throwIfAborted();
-        // No abort signal is passed on purpose: an aborted request breaks the verifiedFetch instance
-        // and all following requests hang. Cancelling the body instead stops the download.
-        response = await verifiedFetch(ipfsUrl);
-    } catch (error) {
-        if (!signal.aborted) resetVerifiedFetch(verifiedFetchP);
-        throw error;
-    }
-    if (!response.ok) {
-        response.body?.cancel().catch(() => {
-        });
-        throw new Error(`Error loading ${ipfsUrl}: ${response.status} ${response.statusText}`);
-    }
-
-    const totalBytes = Number(response.headers.get("content-length"));
-    const reader = response.body.getReader();
-    const removeListener = onAbort(signal, () => reader.cancel().catch(() => {
-    }));
-    try {
-        const chunks = [];
-        let bytesRead = 0;
-        while (true) {
-            const {done, value} = await reader.read();
-            signal.throwIfAborted();
-            if (done) break;
-            chunks.push(value);
-            bytesRead += value.length;
-            if (totalBytes && onProgress) onProgress(bytesRead / totalBytes);
-        }
-        return new Blob(chunks, {type: response.headers.get("content-type") || ""});
-    } finally {
-        removeListener();
-    }
+    // the service worker streams the song, so playback can start before the download finishes.
+    // if streaming fails, the next attempt downloads the whole song instead
+    const allowServiceWorker = !session.streamingFailed;
+    session.streamingFailed = true;
+    return await getServiceWorkerUrl(`ipfs/${IPFS_CID}/${path}`, {allowServiceWorker, signal, onProgress});
 }
 
 function swapButtons() {
