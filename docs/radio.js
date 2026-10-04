@@ -24,6 +24,12 @@ let currentSession = null;
 class WeatherError extends Error {
 }
 
+if ("serviceWorker" in navigator && !window.location.href.startsWith("file:")) {
+    navigator.serviceWorker.register("sw.js").catch(error => {
+        console.error("Service worker registration failed", error);
+    });
+}
+
 function onAbort(signal, callback) {
     if (signal.aborted) {
         callback();
@@ -106,7 +112,7 @@ function abortSession(session) {
 async function startSession(startAt, options) {
     abortSession(pendingSession);
     const controller = new AbortController();
-    const session = {controller, signal: controller.signal, startAt, ...options, audio: null};
+    const session = {controller, signal: controller.signal, startAt, ...options, audio: null, preferBlob: false};
     const signal = session.signal;
     pendingSession = session;
     onAbort(signal, () => {
@@ -160,7 +166,7 @@ async function loadAndPlay(session, signal) {
     }
 
     showProgress(session, "Loading");
-    const src = await loadSong(game, weather, hour, signal, p => {
+    const src = await loadSong(game, weather, hour, session, signal, p => {
         showProgress(session, Math.trunc(p * 100) + "%");
     });
 
@@ -286,7 +292,7 @@ function fadeTo(audio, getTarget, signal) {
     });
 }
 
-async function loadSong(game, weather, hour24, signal, onProgress) {
+async function loadSong(game, weather, hour24, session, signal, onProgress) {
     const hour12Suffix = (hour24 >= 12) ? 'PM' : 'AM';
     let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
     hour12 = (hour12 === 0) ? 12 : hour12;
@@ -297,6 +303,13 @@ async function loadSong(game, weather, hour24, signal, onProgress) {
 
     if (window.location.href.startsWith("file:")) {
         return `songs/${path}`;
+    }
+
+    // the service worker streams the song from IPFS, so playback can start before the download finishes
+    if (navigator.serviceWorker?.controller && !session.preferBlob) {
+        // if streaming fails, the next attempt downloads the whole song instead
+        session.preferBlob = true;
+        return `ipfs/${IPFS_CID}/${path}`;
     }
 
     console.log("Loading blob from IPFS...");
