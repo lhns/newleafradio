@@ -483,8 +483,7 @@ async function loadSong(game, weather, hour24, session, signal, onProgress) {
     let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
     hour12 = (hour12 === 0) ? 12 : hour12;
 
-    // all songs are MP4 files (New Horizons and New Leaf contain mp3 audio, see tools/fix-vbr-mp3.sh),
-    // because browsers seek exactly in them
+    // MP4, because browsers seek exactly in it (mp3 audio repackaged by tools/fix-vbr-mp3.sh, or AAC)
     const path = `${weather}${game}/${hour12}${hour12Suffix}.m4a`;
     console.log(`Loading ${path}`);
 

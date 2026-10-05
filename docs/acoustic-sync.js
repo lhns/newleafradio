@@ -210,12 +210,15 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
 
     const probe = await fetchSong(src, {headers: {range: "bytes=0-1"}, signal});
     const size = Number(probe.headers.get("content-range")?.split("/")[1]);
-    // e.g. blob URLs ignore the range: the whole file is in memory anyway
-    const whole = probe.status === 206 && size ? null : new Uint8Array(await probe.arrayBuffer());
-    if (!whole) probe.body?.cancel().catch(() => {
-    });
+    let whole = null;
+    if (probe.status === 206 && size) {
+        probe.body?.cancel().catch(() => {
+        });
+    } else {
+        // e.g. blob URLs ignore the range: the whole file is in memory anyway
+        whole = new Uint8Array(await probe.arrayBuffer());
+    }
     const fileSize = whole ? whole.length : size;
-    // the bytes in [start, end)
     const read = async (start, end) => {
         if (whole) return whole.subarray(start, end);
         const response = await fetchSong(src, {headers: {range: `bytes=${start}-${end - 1}`}, signal});
@@ -266,8 +269,7 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     return {samples: mono, startSeconds};
 }
 
-// [start, end) of the mp3 frames in an MP4 file with mp3 audio, which are stored back to back in its mdat box,
-// or null (e.g. AAC audio). read(start, end) returns the bytes in that range.
+// [start, end) of the mp3 frames in an MP4 file, which are stored back to back in its mdat box, or null (e.g. AAC)
 async function mp4Mp3Frames(read, fileSize) {
     for (let offset = 0; offset + 8 <= fileSize;) {
         const header = await read(offset, Math.min(offset + 16, fileSize));
@@ -276,6 +278,7 @@ async function mp4Mp3Frames(read, fileSize) {
         let headerSize = 8;
         if (size === 1) {
             // 64-bit size
+            if (header.length < 16) return null;
             size = Number(view.getBigUint64(8));
             headerSize = 16;
         } else if (size === 0) {
