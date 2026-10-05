@@ -8,7 +8,8 @@ Wall-clock sync (0002) leaves devices tens of ms to seconds apart (clock offsets
 
 ## Decision
 A manual "Sync with nearby device" button that listens to the music:
-- It records ~4 s from the microphone (echo cancellation, noise suppression and auto gain off), the last 2 s with this device muted, and cross-correlates the recording with the decoded song.
+- It records from the microphone (echo cancellation, noise suppression and auto gain off): 2 s, then 2 s with this device muted (after 0.5 s for the mute to reach the speaker), and cross-correlates the recording with the decoded song.
+- The microphone can deliver exact zeros for its first ~0.5 s (seen in Firefox on Windows and in Chrome), so recording starts only 0.5 s after the first sound, which also skips output glitches when the microphone opens. Without sound within 3 s the measurement fails with "The microphone didn't deliver any sound".
 - The peak that disappears when muted is this device; the strongest remaining peak is the other device. Their distance is the offset, applied to `syncOffset` and corrected via 0017.
 - Only the device being synced needs the new code; nothing is emitted.
 - Several devices: keep one as anchor and press Sync on the others; it syncs to the loudest one and reports the others.

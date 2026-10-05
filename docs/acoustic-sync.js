@@ -5,7 +5,10 @@
 // The analysis runs in a worker loading this file, so it doesn't block the page.
 // Uses onAbort from radio.js.
 
-const SYNC_WARMUP_S = 0.3;
+// the microphone can deliver silence at first (Firefox: ~0.5 s), the measurement waits this long for sound
+const SYNC_MIC_TIMEOUT_S = 3;
+// time after the microphone delivers sound before recording (output glitches when the microphone opens)
+const SYNC_SETTLE_S = 0.5;
 const SYNC_UNMUTED_S = 2;
 // time for muting to reach the speaker (output latency, e.g. bluetooth)
 const SYNC_GUARD_S = 0.5;
@@ -113,7 +116,7 @@ async function measureSongOffset({src, getPosition, setMuted, signal}) {
     let stream = null;
     try {
         const factor = analysisFactor(context.sampleRate);
-        const recordingSeconds = SYNC_WARMUP_S + SYNC_UNMUTED_S + SYNC_GUARD_S + SYNC_MUTED_S;
+        const recordingSeconds = SYNC_MIC_TIMEOUT_S + SYNC_SETTLE_S + SYNC_UNMUTED_S + SYNC_GUARD_S + SYNC_MUTED_S;
         const reference = loadReference(src, getPosition(), recordingSeconds, context.sampleRate / factor, signal);
         reference.catch(() => {
         });
@@ -174,32 +177,43 @@ async function record(context, stream, getPosition, setMuted, signal) {
 
     const chunks = [];
     let length = 0;
+    // the first sample with sound: until the microphone runs, the recorder records exact zeros
+    let micStart = -1;
     let onSamples = null;
     recorder.port.onmessage = ({data}) => {
+        if (micStart < 0) {
+            const i = data.findIndex(sample => sample !== 0);
+            if (i >= 0) micStart = length + i;
+        }
         chunks.push(data);
         length += data.length;
         onSamples?.();
     };
-    const waitForSamples = samples => new Promise((resolve, reject) => {
+    // resolves once done() returns true, which is checked whenever samples arrive
+    const waitFor = done => new Promise((resolve, reject) => {
         const removeListener = onAbort(signal, () => {
             onSamples = null;
             reject(signal.reason);
         });
         onSamples = () => {
-            if (length < samples) return;
+            if (!done()) return;
             onSamples = null;
             removeListener();
             resolve();
         };
         if (!signal.aborted) onSamples();
     });
+    const waitForSamples = samples => waitFor(() => length >= samples);
 
     source.connect(recorder);
     // the recorder only outputs silence, but has to be connected to be processed
     recorder.connect(context.destination);
     try {
         const rate = context.sampleRate;
-        const unmutedStart = Math.round(SYNC_WARMUP_S * rate);
+        const timeout = Math.round(SYNC_MIC_TIMEOUT_S * rate);
+        await waitFor(() => micStart >= 0 || length >= timeout);
+        if (micStart < 0) throw new SyncError("The microphone didn't deliver any sound");
+        const unmutedStart = micStart + Math.round(SYNC_SETTLE_S * rate);
         const unmutedEnd = unmutedStart + Math.round(SYNC_UNMUTED_S * rate);
         // the song position when sample i was recorded
         const positionAt = i => getPosition() - (length - i) / rate;
@@ -228,7 +242,7 @@ async function record(context, stream, getPosition, setMuted, signal) {
             samples,
             // the song should advance as much as the recording, otherwise the playback rate changed or it was seeked
             timing: {
-                unmutedStart, mutedStart, endPosition,
+                micStart, unmutedStart, mutedStart, endPosition,
                 driftMs: +((endPosition - position - (mutedEnd - unmutedStart) / rate) * 1000).toFixed(1)
             }
         };
