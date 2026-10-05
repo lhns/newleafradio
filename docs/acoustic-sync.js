@@ -3,7 +3,7 @@
 // cross-correlation, and this device is told apart by muting it for the last part of the recording.
 // Microphone and output latency cancel out, because all devices are heard through the same microphone.
 // The analysis runs in a worker loading this file, so it doesn't block the page.
-// Uses onAbort from radio.js and CONTENT_TYPES from ipfs.js.
+// Uses onAbort from radio.js.
 
 const SYNC_WARMUP_S = 0.3;
 const SYNC_UNMUTED_S = 2;
@@ -209,7 +209,6 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     ];
 
     const probe = await fetchSong(src, {headers: {range: "bytes=0-1"}, signal});
-    const type = probe.headers.get("content-type") || "";
     const size = Number(probe.headers.get("content-range")?.split("/")[1]);
     // e.g. blob URLs ignore the range: the whole file is in memory anyway
     const whole = probe.status === 206 && size ? null : new Uint8Array(await probe.arrayBuffer());
@@ -224,8 +223,7 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     };
 
     // mp3 frames can be decoded from anywhere, so only the bytes around the position are needed
-    const frames = type.startsWith(CONTENT_TYPES.mp3) ? {start: 0, end: fileSize}
-        : type.startsWith(CONTENT_TYPES.m4a) ? await mp4Mp3Frames(read, fileSize) : null;
+    const frames = await mp4Mp3Frames(read, fileSize);
     let bytes;
     let startSeconds = 0;
     if (frames) {
