@@ -1,6 +1,6 @@
 # 0012. Converge playback by seeking and rate changes
 
-- Status: Accepted
+- Status: Superseded by [0017](0017-jump-only-sync.md)
 - Date: 2026-10-05 (PR #10)
 
 ## Context
