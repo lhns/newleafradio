@@ -413,7 +413,6 @@ async function syncWithNearbyDevice() {
         try {
             measurement = await measureSongOffset({
                 src: audio.currentSrc,
-                duration: audio.duration,
                 getPosition: () => audio.currentTime,
                 setMuted: muted => audio.muted = muted,
                 signal: session.signal
