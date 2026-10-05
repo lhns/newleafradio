@@ -1,4 +1,4 @@
-const IPFS_CID = "bafybeidq3jpqteqcirnnstx7pyrf4i2voaagrrhtaawlewvtv5heth5lqi";
+const IPFS_CID = "bafybeihioe7qpue66ytxtvoysojww7k46ay4fwyug2qxoo52nqjuuljnnu";
 // New Horizons is mp3 repackaged as MP4 (tools/fix-vbr-mp3.sh), because browsers can't seek exactly in its VBR mp3s
 const SONG_EXTENSIONS = {
     WildWorld: "m4a",
