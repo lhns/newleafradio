@@ -4,6 +4,8 @@ const FADE_INTERVAL_MS = 500;
 // the next song starts loading this long before the hour changes
 const PREFETCH_MS = 60 * 1000;
 const RETRY_DELAY_MS = 2000;
+// a song that doesn't receive data for this long is reloaded
+const STALL_MS = 20 * 1000;
 
 let radioOn = false;
 let checkWeatherFlag = false;
@@ -139,6 +141,7 @@ async function startSession(startAt, options) {
                 return;
             }
             console.error("Error playing song. Retrying...", error);
+            showProgress(session, "Retrying");
             try {
                 await sleep(RETRY_DELAY_MS, signal);
             } catch {
@@ -168,18 +171,63 @@ async function loadAndPlay(session, signal) {
     });
 
     const audio = createAudio(src, session.startAt, signal);
-    // let the browser start buffering until the song is supposed to start
-    await Promise.race([
-        waitForMedia(audio, "canplay", signal),
-        sleep(session.startAt.getTime() - Date.now(), signal)
-    ]);
-    await sleep(session.startAt.getTime() - Date.now(), signal);
+    showProgress(session, "Connecting");
+    audio.addEventListener("loadedmetadata", () => showProgress(session, "Buffering"), {once: true});
 
-    // start muted, the previous song keeps playing until this one is actually audible
-    audio.muted = true;
-    await Promise.all([waitForMedia(audio, "playing", signal), audio.play()]);
+    const stallWatch = new AbortController();
+    const removeListener = onAbort(signal, () => stallWatch.abort());
+    try {
+        await Promise.race([
+            failOnStall(audio, stallWatch.signal),
+            (async () => {
+                // let the browser start buffering until the song is supposed to start
+                await Promise.race([
+                    waitForMedia(audio, "canplay", signal),
+                    sleep(session.startAt.getTime() - Date.now(), signal)
+                ]);
+                await sleep(session.startAt.getTime() - Date.now(), signal);
+
+                // start muted, the previous song keeps playing until this one is actually audible
+                audio.muted = true;
+                await Promise.all([waitForMedia(audio, "playing", signal), audio.play()]);
+            })()
+        ]);
+    } finally {
+        stallWatch.abort();
+        removeListener();
+    }
 
     await promote(session, audio);
+}
+
+// rejects if the audio needs more data but hasn't received any for STALL_MS
+function failOnStall(audio, signal) {
+    return new Promise((resolve, reject) => {
+        let lastActivity = Date.now();
+        // the browser stopped loading on purpose, e.g. while preloading or because of its preload policy
+        let suspended = false;
+        const onProgress = () => {
+            lastActivity = Date.now();
+            suspended = false;
+        };
+        const onSuspend = () => suspended = true;
+        audio.addEventListener("progress", onProgress);
+        audio.addEventListener("suspend", onSuspend);
+        const id = setInterval(() => {
+            if (suspended || audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+                lastActivity = Date.now();
+            } else if (Date.now() - lastActivity > STALL_MS) {
+                cleanup();
+                reject(new Error(`No data received for ${STALL_MS / 1000} s`));
+            }
+        }, 1000);
+        const cleanup = () => {
+            clearInterval(id);
+            audio.removeEventListener("progress", onProgress);
+            audio.removeEventListener("suspend", onSuspend);
+        };
+        onAbort(signal, cleanup);
+    });
 }
 
 function showProgress(session, text) {
@@ -209,13 +257,15 @@ async function promote(session, audio) {
     fadeTo(audio, () => maxVolume, session.signal).catch(() => {
     });
 
-    // e.g. the stream broke after playback started
-    audio.addEventListener("error", () => {
-        console.error("Error during playback. Restarting...", audio.error);
+    // e.g. the stream broke or stalled after playback started
+    const restart = reason => {
+        console.error("Error during playback. Restarting...", reason);
         if (radioOn && currentSession === session && !pendingSession) {
             startSession(new Date(), {showProgress: false, fadeOutPrevious: false});
         }
-    }, {once: true});
+    };
+    audio.addEventListener("error", () => restart(audio.error), {once: true});
+    failOnStall(audio, session.signal).catch(restart);
 
     // a song that started late (e.g. slow download) still ends at its hour
     const songEnd = nextHour(session.startAt);

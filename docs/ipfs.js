@@ -49,7 +49,10 @@ function loadVerifiedFetchScript() {
 
 function getVerifiedFetch() {
     if (!verifiedFetchPromise) {
-        const promise = loadVerifiedFetchScript().then(() => HeliaVerifiedFetch.createVerifiedFetch({}));
+        // No recursive HTTP gateway: providers are found via delegated routing and fetched from directly.
+        // The default gateway (trustless-gateway.link) is used for every block once it served the first one,
+        // and other providers are only looked up after it fails, which can take a 60 s timeout.
+        const promise = loadVerifiedFetchScript().then(() => HeliaVerifiedFetch.createVerifiedFetch({gateways: []}));
         promise.catch(() => {
             if (verifiedFetchPromise === promise) verifiedFetchPromise = null;
         });
