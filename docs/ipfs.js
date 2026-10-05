@@ -80,7 +80,8 @@ async function resetVerifiedFetch(broken) {
 const IPFS_SLOW_MS = 10 * 1000;
 // fails a download that didn't receive data for this long. Requests for a block join a pending request for the
 // same block, so a stuck block request would also stall every retry, which is why verifiedFetch is replaced.
-const IPFS_STUCK_MS = 30 * 1000;
+// Shorter than the player's STALL_MS (radio.js), which would otherwise cancel the download first.
+const IPFS_STUCK_MS = 15 * 1000;
 
 // Fetches ipfs://<cidPath>, optionally only a byte range ("bytes=start-end").
 // Aborting the signal cancels the download.
