@@ -71,6 +71,11 @@
                                     <h4 class="mt-4 mb-1">Volume</h5>
                                     <input type="range" min="1" max="100" value="100" class="slider" id="myRange" oninput="slideVolume(this)">
                                 </div>
+
+                                <div class="pb-3">
+                                    <button onclick="syncWithNearbyDevice()" id="sync" type="button" class="btn btn-outline-secondary btn-sm">Sync with nearby device</button>
+                                    <small id="sync-status" class="d-block text-muted mt-1"></small>
+                                </div>
                             </div>
                             <div style="text-align: center" class="col-12 col-md-6">
                                 <img class="d-md-block d-none w-100" src="radio_image.png">
@@ -116,6 +121,7 @@
         </div>
         <script src="ipfs.js"></script>
         <script src="sw.js"></script>
+        <script src="acoustic-sync.js"></script>
         <script src="radio.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
     </body>
