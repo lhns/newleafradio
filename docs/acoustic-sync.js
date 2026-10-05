@@ -21,8 +21,8 @@ const SYNC_OWN_SEARCH_S = 1;
 const SYNC_OWN_CANDIDATES = 8;
 // a weaker match of this device is searched this close to the strongest match (another device)
 const SYNC_OWN_NEARBY_S = 0.5;
-// other devices are searched this close to this device, then once more in the wider range
-const SYNC_OTHER_SEARCH_S = [0.5, 1.5];
+// other devices are searched this close to this device, then in the wider ranges (e.g. system clocks that differ)
+const SYNC_OTHER_SEARCH_S = [5];
 const SYNC_OTHER_CANDIDATES = 5;
 const SYNC_PEAK_EXCLUSION_S = 0.01;
 // room reflections arrive up to this much later than the direct sound
@@ -226,8 +226,12 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     let startSeconds = 0;
     if (isMp3) {
         const [start, end] = around(size / duration, size);
-        startSeconds = start / size * duration;
         if (bytes.byteLength === size) bytes = bytes.slice(start, end);
+        // some browsers (Firefox) only decode data that starts with a frame
+        const skipped = start > 0 ? mp3FrameStart(new Uint8Array(bytes)) : 0;
+        if (skipped < 0) throw new SyncError("The song could not be decoded for syncing");
+        bytes = bytes.slice(skipped);
+        startSeconds = (start + skipped) / size * duration;
     }
     signal.throwIfAborted();
 
@@ -254,6 +258,36 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     }
     for (let i = 0; i < mono.length; i++) mono[i] /= buffer.numberOfChannels;
     return {samples: mono, startSeconds};
+}
+
+const MP3_BITRATES_KBPS = {
+    1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+    2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+};
+// by version bits: 0 MPEG 2.5, 2 MPEG 2, 3 MPEG 1
+const MP3_SAMPLE_RATES = {0: [11025, 12000, 8000], 2: [22050, 24000, 16000], 3: [44100, 48000, 32000]};
+
+// length in bytes of the MPEG layer III frame starting at i, or 0 if there is no valid frame header
+function mp3FrameLength(bytes, i) {
+    if (i + 4 > bytes.length || bytes[i] !== 0xFF || (bytes[i + 1] & 0xE0) !== 0xE0) return 0;
+    const version = (bytes[i + 1] >> 3) & 3;
+    const layer = (bytes[i + 1] >> 1) & 3;
+    const bitrateIndex = bytes[i + 2] >> 4;
+    const sampleRateIndex = (bytes[i + 2] >> 2) & 3;
+    if (version === 1 || layer !== 1 || bitrateIndex === 0 || bitrateIndex === 15 || sampleRateIndex === 3) return 0;
+    const bitrate = MP3_BITRATES_KBPS[version === 3 ? 1 : 2][bitrateIndex] * 1000;
+    const sampleRate = MP3_SAMPLE_RATES[version][sampleRateIndex];
+    const padding = (bytes[i + 2] >> 1) & 1;
+    return Math.floor((version === 3 ? 144 : 72) * bitrate / sampleRate) + padding;
+}
+
+// offset of the first frame in a slice of an mp3, confirmed by the frame after it, or -1
+function mp3FrameStart(bytes) {
+    for (let i = 0; i + 4 <= bytes.length; i++) {
+        const length = mp3FrameLength(bytes, i);
+        if (length && mp3FrameLength(bytes, i + length)) return i;
+    }
+    return -1;
 }
 
 // the microphone recording is decimated by this factor for the analysis
