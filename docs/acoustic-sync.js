@@ -27,8 +27,15 @@ const SYNC_OTHER_CANDIDATES = 5;
 const SYNC_PEAK_EXCLUSION_S = 0.01;
 // room reflections arrive up to this much later than the direct sound
 const SYNC_REFLECTION_S = 0.04;
-// random matches of noise reach about 9 standard deviations; this device is close to the microphone and must be clear
-const SYNC_MIN_SNR = 7;
+// strong early reflections (e.g. tiles) can match better than the direct sound; an earlier arrival at least this
+// strong relative to the strongest match within the reflection time is taken as the direct sound
+const SYNC_DIRECT_RATIO = 0.6;
+// matches this close to a stronger one are side lobes of it (tonal music), not separate arrivals
+const SYNC_SIDELOBE_S = 0.0025;
+// Random matches of background noise (speech, other music) reach about 10 standard deviations, and parts of a song
+// that resemble the recorded part reach about 14 in reverberant rooms. This device is close to the microphone and
+// must be clear.
+const SYNC_MIN_SNR = 15;
 const SYNC_OWN_MIN_SNR = 18;
 // correlations are normalized by the energy of the song part, but at least by this fraction of its average
 const SYNC_ENERGY_FLOOR = 0.05;
@@ -402,9 +409,22 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     }
     const others = peaks.filter(peak => zM[peak] >= SYNC_OTHER_DEVICE_RATIO * zM[peaks[0]]);
 
+    const sidelobes = Math.round(SYNC_SIDELOBE_S * analysisRate);
+    own = directArrival(zU, own, reflections, sidelobes);
+    others[0] = directArrival(zM, others[0], reflections, sidelobes);
     const ownPosition = own + parabolicOffset(zU, own);
     const offsetOf = peak => (peak + parabolicOffset(zM, peak) - shift - ownPosition) / analysisRate;
     return {offset: offsetOf(others[0]), others: others.slice(1).map(offsetOf)};
+}
+
+// Reflections arrive after the direct sound, so they match earlier song positions than it. Returns the match with
+// the latest song position (the earliest arrival) within the reflection time after peak, if it is comparably strong.
+function directArrival(values, peak, reflections, sidelobes) {
+    let direct = peak;
+    for (let k = peak + sidelobes; k <= Math.min(values.length - 2, peak + reflections); k++) {
+        if (values[k] >= values[k - 1] && values[k] > values[k + 1] && values[k] >= SYNC_DIRECT_RATIO * values[peak]) direct = k;
+    }
+    return direct;
 }
 
 function rms(signal, from, length) {
