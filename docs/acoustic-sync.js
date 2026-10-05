@@ -16,8 +16,7 @@ const SYNC_MAX_WHOLE_FILE_BYTES = 30 * 1024 * 1024;
 const SYNC_ANALYSIS_RATE = 16000;
 const SYNC_BAND_HZ = [300, 7000];
 const SYNC_PHAT_BETA = 0.7;
-// This device is heard earlier in the song than its playback position says, by its output and input latency,
-// so it is searched from this much before (e.g. bluetooth) to this much after that position (inaccuracies).
+// this device is searched from this much before its playback position (latency) to this much after
 const SYNC_OWN_LATENCY_S = 0.7;
 const SYNC_OWN_AHEAD_S = 0.05;
 const SYNC_OWN_CANDIDATES = 8;
@@ -27,21 +26,17 @@ const SYNC_OTHER_CANDIDATES = 5;
 const SYNC_PEAK_EXCLUSION_S = 0.01;
 // room reflections arrive up to this much later than the direct sound
 const SYNC_REFLECTION_S = 0.04;
-// strong early reflections (e.g. tiles) can match better than the direct sound; an earlier arrival at least this
-// strong relative to the strongest match within the reflection time is taken as the direct sound
+// an earlier arrival at least this strong relative to a match is the direct sound, the match a reflection
 const SYNC_DIRECT_RATIO = 0.6;
-// matches this close to a stronger one are side lobes of it (tonal music), not separate arrivals
+// matches this close to a stronger one are its side lobes (tonal music)
 const SYNC_SIDELOBE_S = 0.0025;
-// Random matches of background noise (speech, other music) reach about 10 standard deviations, and parts of a song
-// that resemble the recorded part reach about 14 in reverberant rooms. This device is close to the microphone and
-// must be clear.
+// noise and similar parts of the song score up to ~14; this device is close to the microphone
 const SYNC_MIN_SNR = 15;
 const SYNC_OWN_MIN_SNR = 18;
-// correlations are normalized by the energy of the song part, but at least by this fraction of its average
+// correlations are divided by the song part's energy, but at least this fraction of the average
 const SYNC_ENERGY_FLOOR = 0.05;
 const SYNC_OTHER_DEVICE_RATIO = 0.75;
-// Another match this strong relative to the strongest one, further away than SYNC_DEVICES_SPREAD_S, could be
-// the other device as well as repeating music, so the result is rejected instead of guessed.
+// a second match this strong and further away is ambiguous (repeating music), so the result is rejected
 const SYNC_AMBIGUOUS_RATIO = 0.8;
 const SYNC_DEVICES_SPREAD_S = 0.5;
 // a match counts as heard while muted if it is at least this strong relative to the strongest match of each part
@@ -365,10 +360,6 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     const zM = zScores(normalizeByEnergy(correlate(m, referenceSpectrum, n, analysisRate), s, m.length));
     const exclusion = Math.round(SYNC_PEAK_EXCLUSION_S * analysisRate);
     const reflections = Math.round(SYNC_REFLECTION_S * analysisRate);
-    const window = (center, seconds, length) => {
-        const radius = Math.round(seconds * analysisRate);
-        return [Math.max(0, center - radius), Math.min(length - 1, center + radius)];
-    };
 
     // this device: matches shortly before the expected position (playback position minus latency)
     const expected = Math.round((position - referenceStart) * analysisRate);
@@ -388,9 +379,8 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     // how much louder the song is while unmuted, relative to the reference at the matched positions
     const gain = (signal, at) => rms(signal, 0, signal.length) / Math.max(rms(s, at, signal.length), 1e-9);
 
-    // This device is the strongest match that is gone while muted. Weaker matches within the strongest match's
-    // reflections can't be told apart reliably. Without such a match, the strongest match is this device in sync
-    // with another device, if the song is louder while this device plays.
+    // this device is the strongest match that is gone while muted (outside the strongest one's reflections),
+    // otherwise the strongest match if the song is louder while unmuted (in sync with another device)
     let own = candidates.find(peak => zU[peak] >= SYNC_OWN_MIN_SNR && zU[peak] >= SYNC_OWN_MIN_RELATIVE * zU[strongest]
         && (peak === strongest || Math.abs(peak - strongest) > reflections)
         && !heardWhileMuted(peak, peak === strongest ? SYNC_HEARD_WHILE_MUTED_RATIO : SYNC_OWN_GONE_WHILE_MUTED_RATIO));
@@ -400,8 +390,9 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     if (own === undefined) throw new SyncError("Couldn't hear this device's own speaker, turn the volume up");
 
     // other devices: heard while this device is muted
-    const [from, to] = window(own + shift, SYNC_OTHER_SEARCH_S, zM.length);
-    const peaks = findPeaks(zM, from, to, exclusion, SYNC_OTHER_CANDIDATES);
+    const radius = Math.round(SYNC_OTHER_SEARCH_S * analysisRate);
+    const peaks = findPeaks(zM, Math.max(0, own + shift - radius), Math.min(zM.length - 1, own + shift + radius),
+        exclusion, SYNC_OTHER_CANDIDATES);
     if (!peaks.length || zM[peaks[0]] < SYNC_MIN_SNR) throw new SyncError("No other device heard");
     const spread = Math.round(SYNC_DEVICES_SPREAD_S * analysisRate);
     if (peaks.some(peak => Math.abs(peak - peaks[0]) > spread && zM[peak] >= SYNC_AMBIGUOUS_RATIO * zM[peaks[0]])) {
@@ -417,8 +408,8 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     return {offset: offsetOf(others[0]), others: others.slice(1).map(offsetOf)};
 }
 
-// Reflections arrive after the direct sound, so they match earlier song positions than it. Returns the match with
-// the latest song position (the earliest arrival) within the reflection time after peak, if it is comparably strong.
+// reflections arrive later, so they match earlier song positions: the latest comparably strong match within the
+// reflection time is the direct sound
 function directArrival(values, peak, reflections, sidelobes) {
     let direct = peak;
     for (let k = peak + sidelobes; k <= Math.min(values.length - 2, peak + reflections); k++) {
@@ -488,14 +479,11 @@ function correlate(x, referenceSpectrum, n, rate) {
     return xRe;
 }
 
-// Divides each lag of a correlation by the energy of the reference part it was compared with.
-// Otherwise loud parts of the song match anything better than quiet parts match themselves.
-// Returns the valid lags (where the signal lies completely within the reference).
+// divides each valid lag of a correlation by the energy of the reference part, so loud parts don't match everything
 function normalizeByEnergy(correlation, reference, length) {
     const result = correlation.subarray(0, Math.max(0, reference.length - length + 1));
     let total = 0;
     for (const value of reference) total += value * value;
-    // near silent parts are not amplified beyond this, they would turn noise into matches
     const floor = SYNC_ENERGY_FLOOR * total * length / reference.length + 1e-12;
     let energy = 0;
     for (let i = 0; i < length; i++) energy += reference[i] * reference[i];
