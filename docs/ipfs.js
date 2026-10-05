@@ -78,14 +78,53 @@ async function resetVerifiedFetch(broken) {
 
 // warns if a download didn't receive data for this long
 const IPFS_SLOW_MS = 10 * 1000;
-// fails a download that didn't receive data for this long. Requests for a block join a pending request for the
-// same block, so a stuck block request would also stall every retry, which is why verifiedFetch is replaced.
+// fails a download that didn't receive its response or data for this long. Requests for a block join a pending
+// request for the same block, so a stuck block request would also stall every retry, which is why verifiedFetch
+// is replaced.
 // Shorter than the player's STALL_MS (radio.js), which would otherwise cancel the download first.
 const IPFS_STUCK_MS = 15 * 1000;
+// A cancelled response keeps loading blocks until the end of its range (only aborting would stop it, which breaks
+// verifiedFetch). Players cancel their requests all the time, e.g. when seeking, and that background loading
+// delayed the next request by seconds. So open ended ranges are limited, players request the rest when needed.
+const IPFS_MAX_RANGE_BYTES = 2 * 1024 * 1024;
+// blocks loaded in parallel for one response, unlimited by default
+const IPFS_BLOCK_READ_CONCURRENCY = 4;
+
+// file sizes by cidPath, to limit open ended ranges to the end of the file (verified-fetch rejects ranges beyond it)
+const ipfsFileSizes = new Map();
+
+// Rejects if the response doesn't arrive within IPFS_STUCK_MS, e.g. because resolving the path got stuck on a block.
+// The response may still arrive later, then its body is cancelled.
+function failWhenStuck(responsePromise, name) {
+    return new Promise((resolve, reject) => {
+        let stuck = false;
+        const timer = setTimeout(() => {
+            stuck = true;
+            const error = new Error(`IPFS: no response for ${IPFS_STUCK_MS / 1000} s while loading ${name}, giving up`);
+            console.error(error.message);
+            reject(error);
+        }, IPFS_STUCK_MS);
+        responsePromise.then(response => {
+            clearTimeout(timer);
+            if (!stuck) return resolve(response);
+            response.body?.cancel().catch(() => {
+            });
+        }, error => {
+            clearTimeout(timer);
+            reject(error);
+        });
+    });
+}
 
 // Fetches ipfs://<cidPath>, optionally only a byte range ("bytes=start-end").
 // Aborting the signal cancels the download.
 async function fetchIpfs(cidPath, {range, signal} = {}) {
+    const openRangeStart = range?.match(/^bytes=(\d+)-$/)?.[1];
+    if (openRangeStart !== undefined) {
+        const size = ipfsFileSizes.get(cidPath) ?? Infinity;
+        const end = Math.min(Number(openRangeStart) + IPFS_MAX_RANGE_BYTES, size) - 1;
+        if (end >= Number(openRangeStart)) range = `bytes=${openRangeStart}-${end}`;
+    }
     const name = range ? `${cidPath} (${range})` : cidPath;
     const startTime = Date.now();
     const elapsed = () => `${((Date.now() - startTime) / 1000).toFixed(1)} s`;
@@ -96,13 +135,25 @@ async function fetchIpfs(cidPath, {range, signal} = {}) {
         const verifiedFetch = await verifiedFetchP;
         signal?.throwIfAborted();
         // No abort signal is passed on purpose: an aborted request breaks the verifiedFetch instance
-        // and all following requests hang. Cancelling the response body instead stops the download,
-        // because the body is only fetched from IPFS as it is read.
-        response = await verifiedFetch(`ipfs://${cidPath}`, {headers: range ? {range} : {}});
+        // and all following requests hang. Cancelling the response body instead stops reading it.
+        const request = range => failWhenStuck(verifiedFetch(`ipfs://${cidPath}`, {
+            headers: range ? {range} : {},
+            blockReadConcurrency: IPFS_BLOCK_READ_CONCURRENCY
+        }), name);
+        response = await request(range);
+        // the limited range ended behind the end of the file, whose size wasn't known yet
+        if (response.status === 416 && openRangeStart !== undefined) {
+            response.body?.cancel().catch(() => {
+            });
+            range = `bytes=${openRangeStart}-`;
+            response = await request(range);
+        }
     } catch (error) {
         if (!signal?.aborted) resetVerifiedFetch(verifiedFetchP);
         throw error;
     }
+    const size = Number(response.headers.get("content-range")?.split("/")[1]);
+    if (size) ipfsFileSizes.set(cidPath, size);
 
     console.debug(`IPFS: ${response.status} after ${elapsed()} for ${name}`);
     const headers = new Headers(response.headers);
