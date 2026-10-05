@@ -4,8 +4,11 @@ const FADE_INTERVAL_MS = 500;
 // the next song starts loading this long before the hour changes
 const PREFETCH_MS = 60 * 1000;
 const RETRY_DELAY_MS = 2000;
-// a song that doesn't receive data for this long is reloaded
+// a song that doesn't receive data for this long is reloaded. Longer than IPFS_STUCK_MS (ipfs.js), so a stuck
+// download has already failed and replaced the IPFS client in the service worker, and the retry starts fresh.
 const STALL_MS = 20 * 1000;
+// attempts per song to stream it via the service worker, before the whole song is downloaded instead
+const STREAMING_ATTEMPTS = 2;
 
 let radioOn = false;
 let checkWeatherFlag = false;
@@ -122,7 +125,7 @@ function abortSession(session) {
 async function startSession(startAt, options) {
     abortSession(pendingSession);
     const controller = new AbortController();
-    const session = {controller, signal: controller.signal, startAt, ...options, audio: null, streamingFailed: false};
+    const session = {controller, signal: controller.signal, startAt, ...options, audio: null, streamingAttempts: 0};
     const signal = session.signal;
     pendingSession = session;
     onAbort(signal, () => {
@@ -489,9 +492,8 @@ async function loadSong(game, weather, hour24, session, signal, onProgress) {
     }
 
     // the service worker streams the song, so playback can start before the download finishes.
-    // if streaming fails, the next attempt downloads the whole song instead
-    const allowServiceWorker = !session.streamingFailed;
-    session.streamingFailed = true;
+    // if streaming fails repeatedly, the next attempt downloads the whole song instead
+    const allowServiceWorker = session.streamingAttempts++ < STREAMING_ATTEMPTS;
     return await getServiceWorkerUrl(`ipfs/${IPFS_CID}/${path}`, {allowServiceWorker, signal, onProgress});
 }
 
