@@ -76,9 +76,16 @@ async function resetVerifiedFetch(broken) {
     }
 }
 
+// warns if a download didn't receive data for this long
+const IPFS_SLOW_MS = 10 * 1000;
+
 // Fetches ipfs://<cidPath>, optionally only a byte range ("bytes=start-end").
 // Aborting the signal cancels the download.
 async function fetchIpfs(cidPath, {range, signal} = {}) {
+    const name = range ? `${cidPath} (${range})` : cidPath;
+    const startTime = Date.now();
+    const elapsed = () => `${((Date.now() - startTime) / 1000).toFixed(1)} s`;
+    console.debug(`IPFS: loading ${name}`);
     const verifiedFetchP = getVerifiedFetch();
     let response;
     try {
@@ -93,6 +100,7 @@ async function fetchIpfs(cidPath, {range, signal} = {}) {
         throw error;
     }
 
+    console.debug(`IPFS: ${response.status} after ${elapsed()} for ${name}`);
     const headers = new Headers(response.headers);
     // verified-fetch only detects the content type for ranges starting at 0
     const contentType = CONTENT_TYPES[cidPath.split(".").pop().toLowerCase()];
@@ -101,8 +109,27 @@ async function fetchIpfs(cidPath, {range, signal} = {}) {
     let body = response.body;
     if (body) {
         const reader = body.getReader();
-        const cancel = reason => reader.cancel(reason).catch(() => {
-        });
+        let bytes = 0;
+        let finished = false;
+        let lastData = Date.now();
+        const slowTimer = setInterval(() => {
+            if (Date.now() - lastData > IPFS_SLOW_MS) {
+                console.warn(`IPFS: no data for ${((Date.now() - lastData) / 1000).toFixed(0)} s while loading ${name} (${bytes} bytes so far)`);
+                lastData = Date.now();
+            }
+        }, 1000);
+        const finish = message => {
+            if (finished) return false;
+            finished = true;
+            clearInterval(slowTimer);
+            console.debug(`IPFS: ${message} after ${bytes} bytes and ${elapsed()} for ${name}`);
+            return true;
+        };
+        const cancel = reason => {
+            finish("cancelled");
+            return reader.cancel(reason).catch(() => {
+            });
+        };
         if (signal) {
             signal.addEventListener("abort", () => cancel(signal.reason), {once: true});
             if (signal.aborted) cancel(signal.reason);
@@ -111,12 +138,19 @@ async function fetchIpfs(cidPath, {range, signal} = {}) {
             async pull(controller) {
                 try {
                     const {done, value} = await reader.read();
+                    // the stream was cancelled while reading
+                    if (finished) return;
                     if (done) {
+                        finish("finished");
                         controller.close();
                     } else {
+                        bytes += value.length;
+                        lastData = Date.now();
                         controller.enqueue(value);
                     }
                 } catch (error) {
+                    if (!finish("failed")) return;
+                    console.error(`IPFS: error after ${bytes} bytes while loading ${name}`, error);
                     controller.error(error);
                 }
             },

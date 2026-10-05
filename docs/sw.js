@@ -4,8 +4,35 @@
 // getServiceWorkerUrl runs the same handlers in the page instead.
 const IS_SERVICE_WORKER = typeof ServiceWorkerGlobalScope !== "undefined" && self instanceof ServiceWorkerGlobalScope;
 
+// The service worker's console is hard to find, so its log messages are also shown in the pages' consoles.
+const FORWARDED_LOG_LEVELS = ["debug", "info", "warn", "error"];
+
 if (IS_SERVICE_WORKER) {
+    for (const level of FORWARDED_LOG_LEVELS) {
+        const log = console[level].bind(console);
+        console[level] = (...args) => {
+            log(...args);
+            forwardLog(level, args);
+        };
+    }
+    self.addEventListener("error", event => console.error("Uncaught error", event.error ?? event.message));
+    self.addEventListener("unhandledrejection", event => console.error("Unhandled rejection", event.reason));
+
     importScripts("ipfs.js");
+} else {
+    navigator.serviceWorker?.addEventListener("message", event => {
+        const {level, message} = event.data?.serviceWorkerLog ?? {};
+        if (FORWARDED_LOG_LEVELS.includes(level)) console[level]("[service worker]", message);
+    });
+}
+
+function forwardLog(level, args) {
+    const message = args.map(arg => arg instanceof Error ? (arg.stack?.includes(arg.message) ? arg.stack : `${arg.name}: ${arg.message}
+${arg.stack ?? ""}`) : String(arg)).join(" ");
+    self.clients.matchAll().then(clients => {
+        for (const client of clients) client.postMessage({serviceWorkerLog: {level, message}});
+    }).catch(() => {
+    });
 }
 
 // path prefix relative to the service worker scope -> handler(request, path after the prefix)
