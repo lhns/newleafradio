@@ -3,7 +3,7 @@
 // cross-correlation, and this device is told apart by muting it for the last part of the recording.
 // Microphone and output latency cancel out, because all devices are heard through the same microphone.
 // The analysis runs in a worker loading this file, so it doesn't block the page.
-// Uses onAbort from radio.js and CONTENT_TYPES from ipfs.js.
+// Uses onAbort from radio.js.
 
 const SYNC_WARMUP_S = 0.3;
 const SYNC_UNMUTED_S = 2;
@@ -209,36 +209,45 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     ];
 
     const probe = await fetchSong(src, {headers: {range: "bytes=0-1"}, signal});
-    // mp3 frames can be decoded from anywhere, so only the bytes around the position are needed
-    const isMp3 = (probe.headers.get("content-type") || "").startsWith(CONTENT_TYPES.mp3);
-    let response = probe;
-    let size = Number(probe.headers.get("content-range")?.split("/")[1]);
+    const size = Number(probe.headers.get("content-range")?.split("/")[1]);
+    let whole = null;
     if (probe.status === 206 && size) {
         probe.body?.cancel().catch(() => {
         });
-        if (!isMp3 && size > SYNC_MAX_WHOLE_FILE_BYTES) throw new SyncError("This song is too large to sync");
-        const [start, end] = around(size / duration, size);
-        response = await fetchSong(src, isMp3 ? {headers: {range: `bytes=${start}-${end - 1}`}, signal} : {signal});
+    } else {
+        // e.g. blob URLs ignore the range: the whole file is in memory anyway
+        whole = new Uint8Array(await probe.arrayBuffer());
     }
-    // e.g. blob URLs ignore the range: the whole file is in memory anyway
-    let bytes = await response.arrayBuffer();
-    size ||= bytes.byteLength;
+    const fileSize = whole ? whole.length : size;
+    const read = async (start, end) => {
+        if (whole) return whole.subarray(start, end);
+        const response = await fetchSong(src, {headers: {range: `bytes=${start}-${end - 1}`}, signal});
+        return new Uint8Array(await response.arrayBuffer());
+    };
+
+    // mp3 frames can be decoded from anywhere, so only the bytes around the position are needed
+    const frames = await mp4Mp3Frames(read, fileSize);
+    let bytes;
     let startSeconds = 0;
-    if (isMp3) {
-        const [start, end] = around(size / duration, size);
-        if (bytes.byteLength === size) bytes = bytes.slice(start, end);
+    if (frames) {
+        const length = frames.end - frames.start;
+        const [start, end] = around(length / duration, length);
+        bytes = await read(frames.start + start, frames.start + end);
         // some browsers (Firefox) only decode data that starts with a frame
-        const skipped = start > 0 ? mp3FrameStart(new Uint8Array(bytes)) : 0;
+        const skipped = start > 0 ? mp3FrameStart(bytes) : 0;
         if (skipped < 0) throw new SyncError("The song could not be decoded for syncing");
         bytes = bytes.slice(skipped);
-        startSeconds = (start + skipped) / size * duration;
+        startSeconds = (start + skipped) / length * duration;
+    } else {
+        if (fileSize > SYNC_MAX_WHOLE_FILE_BYTES) throw new SyncError("This song is too large to sync");
+        bytes = (whole ?? await read(0, fileSize)).slice();
     }
     signal.throwIfAborted();
 
     let buffer;
     try {
         // decoded at the analysis rate right away, which keeps whole songs small
-        buffer = await new OfflineAudioContext(1, 1, rate).decodeAudioData(bytes);
+        buffer = await new OfflineAudioContext(1, 1, rate).decodeAudioData(bytes.buffer);
     } catch (error) {
         console.error(error);
         throw new SyncError("The song could not be decoded for syncing");
@@ -246,7 +255,7 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     signal.throwIfAborted();
 
     let [start, end] = [0, buffer.length];
-    if (!isMp3) {
+    if (!frames) {
         // the whole song was decoded, so only the part around the position is kept
         [start, end] = around(rate, buffer.length);
         startSeconds = start / rate;
@@ -258,6 +267,33 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     }
     for (let i = 0; i < mono.length; i++) mono[i] /= buffer.numberOfChannels;
     return {samples: mono, startSeconds};
+}
+
+// [start, end) of the mp3 frames in an MP4 file, which are stored back to back in its mdat box, or null (e.g. AAC)
+async function mp4Mp3Frames(read, fileSize) {
+    for (let offset = 0; offset + 8 <= fileSize;) {
+        const header = await read(offset, Math.min(offset + 16, fileSize));
+        const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+        let size = view.getUint32(0);
+        let headerSize = 8;
+        if (size === 1) {
+            // 64-bit size
+            if (header.length < 16) return null;
+            size = Number(view.getBigUint64(8));
+            headerSize = 16;
+        } else if (size === 0) {
+            // the box extends to the end of the file
+            size = fileSize - offset;
+        }
+        if (size < headerSize) return null;
+        if (String.fromCharCode(...header.subarray(4, 8)) === "mdat") {
+            const start = offset + headerSize;
+            const end = Math.min(offset + size, fileSize);
+            return mp3FrameStart(await read(start, Math.min(start + 4096, end))) === 0 ? {start, end} : null;
+        }
+        offset += size;
+    }
+    return null;
 }
 
 const MP3_BITRATES_KBPS = {
