@@ -49,6 +49,10 @@ const SYNC_OWN_MIN_RELATIVE = 0.4;
 const SYNC_OWN_GAIN_RATIO = 1.3;
 // samples the recorder collects before posting them to the main thread
 const SYNC_RECORDER_BLOCK = 2048;
+// matches of each kind in the summary that is logged after each measurement
+const SYNC_SUMMARY_PEAKS = 3;
+// with ?syncdebug, the recording, the reference and the summary are downloaded after each measurement
+const SYNC_DEBUG = typeof location !== "undefined" && new URLSearchParams(location.search).has("syncdebug");
 
 class SyncError extends Error {
 }
@@ -58,15 +62,16 @@ const ACOUSTIC_SYNC_SCRIPT = IS_SYNC_WORKER ? self.location.href : document.curr
 
 if (IS_SYNC_WORKER) {
     self.onmessage = ({data}) => {
+        const summary = {};
         try {
-            self.postMessage({result: analyzeRecording(data)});
+            self.postMessage({result: analyzeRecording(data, summary), summary});
         } catch (error) {
-            self.postMessage({error: {message: error.message, isSyncError: error instanceof SyncError}});
+            self.postMessage({error: {message: error.message, isSyncError: error instanceof SyncError}, summary});
         }
     };
 }
 
-// runs analyzeRecording in a worker
+// runs analyzeRecording in a worker, returns {result, summary}, its errors carry the summary
 function analyzeInWorker(input, signal) {
     return new Promise((resolve, reject) => {
         const worker = new Worker(ACOUSTIC_SYNC_SCRIPT);
@@ -81,9 +86,11 @@ function analyzeInWorker(input, signal) {
         worker.onmessage = ({data}) => {
             finish();
             if (data.error) {
-                reject(data.error.isSyncError ? new SyncError(data.error.message) : new Error(data.error.message));
+                const error = data.error.isSyncError ? new SyncError(data.error.message) : new Error(data.error.message);
+                error.summary = data.summary;
+                reject(error);
             } else {
-                resolve(data.result);
+                resolve(data);
             }
         };
         worker.onerror = event => {
@@ -126,12 +133,33 @@ async function measureSongOffset({src, duration, getPosition, setMuted, signal})
         await context.resume();
         await recorderLoaded;
 
-        const recording = await record(context, stream, getPosition, setMuted, signal);
+        const {samples, timing, ...recording} = await record(context, stream, getPosition, setMuted, signal);
+        const {deviceId, groupId, ...settings} = stream.getAudioTracks()[0]?.getSettings() ?? {};
         stream.getTracks().forEach(track => track.stop());
         stream = null;
 
-        const {samples, startSeconds} = await reference;
-        return await analyzeInWorker({...recording, reference: samples, referenceStart: startSeconds, rate: context.sampleRate}, signal);
+        const {samples: referenceSamples, startSeconds} = await reference;
+        const input = {...recording, reference: referenceSamples, referenceStart: startSeconds, rate: context.sampleRate};
+        const report = (outcome, summary) => {
+            summary = {
+                ...outcome, ...summary, ...timing, settings,
+                outputLatency: context.outputLatency, baseLatency: context.baseLatency
+            };
+            console.debug("sync analysis", summary);
+            try {
+                if (SYNC_DEBUG) downloadSyncDebug(samples, input, summary);
+            } catch (error) {
+                console.error(error);
+            }
+        };
+        try {
+            const {result, summary} = await analyzeInWorker(input, signal);
+            report({result}, summary);
+            return result;
+        } catch (error) {
+            if (error.summary) report({error: error.message}, error.summary);
+            throw error;
+        }
     } finally {
         setMuted(false);
         stream?.getTracks().forEach(track => track.stop());
@@ -173,15 +201,17 @@ async function record(context, stream, getPosition, setMuted, signal) {
         const rate = context.sampleRate;
         const unmutedStart = Math.round(SYNC_WARMUP_S * rate);
         const unmutedEnd = unmutedStart + Math.round(SYNC_UNMUTED_S * rate);
+        // the song position when sample i was recorded
+        const positionAt = i => getPosition() - (length - i) / rate;
         await waitForSamples(unmutedStart);
-        // the song position when the unmuted part started
-        const position = getPosition() - (length - unmutedStart) / rate;
+        const position = positionAt(unmutedStart);
         await waitForSamples(unmutedEnd);
         setMuted(true);
         const mutedStart = length + Math.round(SYNC_GUARD_S * rate);
         const mutedEnd = mutedStart + Math.round(SYNC_MUTED_S * rate);
         await waitForSamples(mutedEnd);
         setMuted(false);
+        const endPosition = positionAt(mutedEnd);
 
         const samples = new Float32Array(mutedEnd);
         let offset = 0;
@@ -194,7 +224,13 @@ async function record(context, stream, getPosition, setMuted, signal) {
             unmuted: samples.subarray(unmutedStart, unmutedEnd),
             muted: samples.subarray(mutedStart, mutedEnd),
             mutedDelay: mutedStart - unmutedStart,
-            position
+            position,
+            samples,
+            // the song should advance as much as the recording, otherwise the playback rate changed or it was seeked
+            timing: {
+                unmutedStart, mutedStart, endPosition,
+                driftMs: +((endPosition - position - (mutedEnd - unmutedStart) / rate) * 1000).toFixed(1)
+            }
         };
     } finally {
         recorder.port.onmessage = null;
@@ -345,9 +381,20 @@ function analysisFactor(rate) {
 // unmuted and muted are recorded at rate, the reference at rate / analysisFactor(rate).
 // mutedDelay is the number of samples from the start of the unmuted to the start of the muted part,
 // position the song position at the start of the unmuted part and referenceStart the one of the reference.
-function analyzeRecording({unmuted, muted, mutedDelay, position, reference, referenceStart, rate}) {
+// summary is filled with details for diagnostics, also when an error is thrown.
+function analyzeRecording({unmuted, muted, mutedDelay, position, reference, referenceStart, rate}, summary = {}) {
     const factor = analysisFactor(rate);
     const analysisRate = rate / factor;
+    const dbfs = signal => +(20 * Math.log10(Math.max(rms(signal, 0, signal.length), 1e-9))).toFixed(1);
+    Object.assign(summary, {
+        rate, analysisRate, position, referenceStart, mutedDelay,
+        unmutedLength: unmuted.length, mutedLength: muted.length, referenceLength: reference.length,
+        unmutedDbfs: dbfs(unmuted), mutedDbfs: dbfs(muted), referenceDbfs: dbfs(reference),
+        thresholds: {
+            ownMinSnr: SYNC_OWN_MIN_SNR, minSnr: SYNC_MIN_SNR, ownLatencyS: SYNC_OWN_LATENCY_S, ownAheadS: SYNC_OWN_AHEAD_S,
+            ownGoneWhileMuted: SYNC_OWN_GONE_WHILE_MUTED_RATIO, heardWhileMuted: SYNC_HEARD_WHILE_MUTED_RATIO
+        }
+    });
     const u = decimate(unmuted, factor);
     const m = decimate(muted, factor);
     const s = reference;
@@ -365,6 +412,22 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     const expected = Math.round((position - referenceStart) * analysisRate);
     const ownFrom = Math.max(0, expected - Math.round(SYNC_OWN_LATENCY_S * analysisRate));
     const ownTo = Math.min(zU.length - 1, expected + Math.round(SYNC_OWN_AHEAD_S * analysisRate));
+    // a match's offset from the expected position in ms and its scores in the unmuted and the muted part
+    const describe = peak => ({
+        ms: +((peak - expected) / analysisRate * 1000).toFixed(1),
+        unmuted: +(zU[peak] ?? NaN).toFixed(1),
+        muted: +maxIn(zM, peak + shift - 2, peak + shift + 2).toFixed(1)
+    });
+    const otherRadius = Math.round(SYNC_OTHER_SEARCH_S * analysisRate);
+    Object.assign(summary, {
+        expected, expectedSeconds: position - referenceStart,
+        ownWindowMs: [(ownFrom - expected) / analysisRate * 1000, (ownTo - expected) / analysisRate * 1000],
+        ownCandidates: findPeaks(zU, ownFrom, ownTo, exclusion, SYNC_SUMMARY_PEAKS).map(describe),
+        // anywhere in the unmuted part, in case this device's latency is outside the window
+        unmutedPeaks: findPeaks(zU, 0, zU.length - 1, exclusion, SYNC_SUMMARY_PEAKS).map(describe),
+        otherPeaks: findPeaks(zM, Math.max(0, expected + shift - otherRadius), Math.min(zM.length - 1, expected + shift + otherRadius),
+            exclusion, SYNC_SUMMARY_PEAKS).map(peak => describe(peak - shift))
+    });
     if (ownFrom > ownTo) throw new SyncError("The song could not be loaded for syncing");
     const candidates = findPeaks(zU, ownFrom, ownTo, exclusion, SYNC_OWN_CANDIDATES);
     if (!candidates.length || zU[candidates[0]] < SYNC_OWN_MIN_SNR) {
@@ -405,7 +468,44 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     others[0] = directArrival(zM, others[0], reflections, sidelobes);
     const ownPosition = own + parabolicOffset(zU, own);
     const offsetOf = peak => (peak + parabolicOffset(zM, peak) - shift - ownPosition) / analysisRate;
+    summary.own = describe(own);
+    summary.other = describe(others[0] - shift);
     return {offset: offsetOf(others[0]), others: others.slice(1).map(offsetOf)};
+}
+
+function downloadSyncDebug(recording, {reference, referenceStart, rate}, summary) {
+    const name = `sync-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    const download = (blob, file) => {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${name}-${file}`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+    };
+    download(wavBlob(recording, rate), "recording.wav");
+    download(wavBlob(reference, rate / analysisFactor(rate)), `reference-${referenceStart.toFixed(3)}s.wav`);
+    download(new Blob([JSON.stringify(summary, null, 2)], {type: "application/json"}), "summary.json");
+}
+
+// mono 16-bit PCM WAV
+function wavBlob(samples, rate) {
+    const view = new DataView(new ArrayBuffer(44 + samples.length * 2));
+    const text = (offset, value) => [...value].forEach((char, i) => view.setUint8(offset + i, char.charCodeAt(0)));
+    text(0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    text(8, "WAVEfmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    text(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+    samples.forEach((sample, i) => view.setInt16(44 + i * 2, Math.round(Math.max(-1, Math.min(1, sample)) * 32767), true));
+    return new Blob([view.buffer], {type: "audio/wav"});
 }
 
 // reflections arrive later, so they match earlier song positions: the latest comparably strong match within the
