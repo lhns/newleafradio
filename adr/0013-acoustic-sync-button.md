@@ -1,7 +1,7 @@
 # 0013. Manual sync button using the music itself
 
 - Status: Accepted
-- Date: 2026-10-05 (PR #10)
+- Date: 2026-10-05 (PRs #10, #29)
 
 ## Context
 Wall-clock sync (0002) leaves devices tens of ms to seconds apart (clock offsets, output latencies). A concept proposed ultrasonic pulses with firefly sync or leader election.
@@ -9,7 +9,7 @@ Wall-clock sync (0002) leaves devices tens of ms to seconds apart (clock offsets
 ## Decision
 A manual "Sync with nearby device" button that listens to the music:
 - It records from the microphone (echo cancellation, noise suppression and auto gain off): 2 s, then 2 s with this device muted (after 0.5 s for the mute to reach the speaker), and cross-correlates the recording with the decoded song.
-- The microphone can deliver exact zeros for its first ~0.5 s (seen in Firefox on Windows and in Chrome), so recording starts only 0.5 s after the first sound, which also skips output glitches when the microphone opens. Without sound within 3 s the measurement fails with "The microphone didn't deliver any sound".
+- The microphone can deliver exact zeros for its first ~0.5 s (seen in Firefox on Windows and in headless Chrome with a fake microphone), so recording starts only 0.5 s after the first sound, which also skips output glitches when the microphone opens. Without sound within 3 s the measurement fails with "The microphone didn't deliver any sound".
 - The peak that disappears when muted is this device; the strongest remaining peak is the other device. Their distance is the offset, applied to `syncOffset` and corrected via 0017.
 - Only the device being synced needs the new code; nothing is emitted.
 - Several devices: keep one as anchor and press Sync on the others; it syncs to the loudest one and reports the others.
