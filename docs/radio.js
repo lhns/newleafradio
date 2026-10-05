@@ -1,4 +1,10 @@
 const IPFS_CID = "bafybeidq3jpqteqcirnnstx7pyrf4i2voaagrrhtaawlewvtv5heth5lqi";
+// New Horizons is mp3 repackaged as MP4 (tools/fix-vbr-mp3.sh), because browsers can't seek exactly in its VBR mp3s
+const SONG_EXTENSIONS = {
+    WildWorld: "m4a",
+    NewLeaf: "mp3",
+    NewHorizons: "m4a"
+};
 const FADE_STEP = 0.1;
 const FADE_INTERVAL_MS = 500;
 // the next song starts loading this long before the hour changes
@@ -483,8 +489,7 @@ async function loadSong(game, weather, hour24, session, signal, onProgress) {
     let hour12 = (hour24 > 12) ? hour24 - 12 : hour24;
     hour12 = (hour12 === 0) ? 12 : hour12;
 
-    const ext = (game === "WildWorld") ? "m4a" : "mp3";
-    const path = `${weather}${game}/${hour12}${hour12Suffix}.${ext}`;
+    const path = `${weather}${game}/${hour12}${hour12Suffix}.${SONG_EXTENSIONS[game]}`;
     console.log(`Loading ${path}`);
 
     if (window.location.href.startsWith("file:")) {
