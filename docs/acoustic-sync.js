@@ -16,19 +16,27 @@ const SYNC_MAX_WHOLE_FILE_BYTES = 30 * 1024 * 1024;
 const SYNC_ANALYSIS_RATE = 16000;
 const SYNC_BAND_HZ = [300, 7000];
 const SYNC_PHAT_BETA = 0.7;
-// this device is searched this close to where its playback position says it should be (output latency, inaccuracies)
-const SYNC_OWN_SEARCH_S = 1;
+// This device is heard earlier in the song than its playback position says, by its output and input latency,
+// so it is searched from this much before (e.g. bluetooth) to this much after that position (inaccuracies).
+const SYNC_OWN_LATENCY_S = 0.7;
+const SYNC_OWN_AHEAD_S = 0.05;
 const SYNC_OWN_CANDIDATES = 8;
-// a weaker match of this device is searched this close to the strongest match (another device)
-const SYNC_OWN_NEARBY_S = 0.5;
-// other devices are searched this close to this device, then in the wider ranges (e.g. system clocks that differ)
-const SYNC_OTHER_SEARCH_S = [5];
+// other devices are searched this close to this device (system clocks can differ by seconds)
+const SYNC_OTHER_SEARCH_S = 5;
 const SYNC_OTHER_CANDIDATES = 5;
 const SYNC_PEAK_EXCLUSION_S = 0.01;
 // room reflections arrive up to this much later than the direct sound
 const SYNC_REFLECTION_S = 0.04;
+// random matches of noise reach about 9 standard deviations; this device is close to the microphone and must be clear
 const SYNC_MIN_SNR = 7;
+const SYNC_OWN_MIN_SNR = 18;
+// correlations are normalized by the energy of the song part, but at least by this fraction of its average
+const SYNC_ENERGY_FLOOR = 0.05;
 const SYNC_OTHER_DEVICE_RATIO = 0.75;
+// Another match this strong relative to the strongest one, further away than SYNC_DEVICES_SPREAD_S, could be
+// the other device as well as repeating music, so the result is rejected instead of guessed.
+const SYNC_AMBIGUOUS_RATIO = 0.8;
+const SYNC_DEVICES_SPREAD_S = 0.5;
 // a match counts as heard while muted if it is at least this strong relative to the strongest match of each part
 const SYNC_HEARD_WHILE_MUTED_RATIO = 0.5;
 // stricter for weaker matches of this device, which must be gone while muted
@@ -346,22 +354,22 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
 
     const n = nextPowerOfTwo(s.length + Math.max(u.length, m.length));
     const referenceSpectrum = spectrum(s, n);
-    const zU = zScores(correlate(u, referenceSpectrum, n, analysisRate), s.length - u.length + 1);
-    const zM = zScores(correlate(m, referenceSpectrum, n, analysisRate), s.length - m.length + 1);
+    const zU = zScores(normalizeByEnergy(correlate(u, referenceSpectrum, n, analysisRate), s, u.length));
+    const zM = zScores(normalizeByEnergy(correlate(m, referenceSpectrum, n, analysisRate), s, m.length));
     const exclusion = Math.round(SYNC_PEAK_EXCLUSION_S * analysisRate);
     const reflections = Math.round(SYNC_REFLECTION_S * analysisRate);
-    const nearby = Math.round(SYNC_OWN_NEARBY_S * analysisRate);
     const window = (center, seconds, length) => {
         const radius = Math.round(seconds * analysisRate);
         return [Math.max(0, center - radius), Math.min(length - 1, center + radius)];
     };
 
-    // this device: matches near the expected position (playback position, output latency)
+    // this device: matches shortly before the expected position (playback position minus latency)
     const expected = Math.round((position - referenceStart) * analysisRate);
-    const [ownFrom, ownTo] = window(expected, SYNC_OWN_SEARCH_S, zU.length);
+    const ownFrom = Math.max(0, expected - Math.round(SYNC_OWN_LATENCY_S * analysisRate));
+    const ownTo = Math.min(zU.length - 1, expected + Math.round(SYNC_OWN_AHEAD_S * analysisRate));
     if (ownFrom > ownTo) throw new SyncError("The song could not be loaded for syncing");
     const candidates = findPeaks(zU, ownFrom, ownTo, exclusion, SYNC_OWN_CANDIDATES);
-    if (!candidates.length || zU[candidates[0]] < SYNC_MIN_SNR) {
+    if (!candidates.length || zU[candidates[0]] < SYNC_OWN_MIN_SNR) {
         throw new SyncError("Couldn't hear the song, turn the volume up");
     }
     const strongest = candidates[0];
@@ -373,32 +381,26 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     // how much louder the song is while unmuted, relative to the reference at the matched positions
     const gain = (signal, at) => rms(signal, 0, signal.length) / Math.max(rms(s, at, signal.length), 1e-9);
 
-    let own;
-    if (!heardWhileMuted(strongest, SYNC_HEARD_WHILE_MUTED_RATIO)) {
+    // This device is the strongest match that is gone while muted. Weaker matches within the strongest match's
+    // reflections can't be told apart reliably. Without such a match, the strongest match is this device in sync
+    // with another device, if the song is louder while this device plays.
+    let own = candidates.find(peak => zU[peak] >= SYNC_OWN_MIN_SNR && zU[peak] >= SYNC_OWN_MIN_RELATIVE * zU[strongest]
+        && (peak === strongest || Math.abs(peak - strongest) > reflections)
+        && !heardWhileMuted(peak, peak === strongest ? SYNC_HEARD_WHILE_MUTED_RATIO : SYNC_OWN_GONE_WHILE_MUTED_RATIO));
+    if (own === undefined && gain(u, strongest) >= SYNC_OWN_GAIN_RATIO * gain(m, strongest + shift)) {
         own = strongest;
-    } else if (gain(u, strongest) >= SYNC_OWN_GAIN_RATIO * gain(m, strongest + shift)) {
-        // the strongest match is louder while this device plays: it is in sync with the other device
-        own = strongest;
-    } else {
-        // the strongest match is another device: this device is a weaker match nearby that is gone while muted,
-        // but not within the other device's reflections, which can't be told apart reliably
-        own = candidates.find(peak => Math.abs(peak - strongest) <= nearby && Math.abs(peak - strongest) > reflections
-            && zU[peak] >= SYNC_MIN_SNR && zU[peak] >= SYNC_OWN_MIN_RELATIVE * zU[strongest]
-            && !heardWhileMuted(peak, SYNC_OWN_GONE_WHILE_MUTED_RATIO));
     }
     if (own === undefined) throw new SyncError("Couldn't hear this device's own speaker, turn the volume up");
 
     // other devices: heard while this device is muted
-    let others = [];
-    for (const seconds of SYNC_OTHER_SEARCH_S) {
-        const [from, to] = window(own + shift, seconds, zM.length);
-        const peaks = findPeaks(zM, from, to, exclusion, SYNC_OTHER_CANDIDATES);
-        if (peaks.length && zM[peaks[0]] >= SYNC_MIN_SNR) {
-            others = peaks.filter(peak => zM[peak] >= SYNC_OTHER_DEVICE_RATIO * zM[peaks[0]]);
-            break;
-        }
+    const [from, to] = window(own + shift, SYNC_OTHER_SEARCH_S, zM.length);
+    const peaks = findPeaks(zM, from, to, exclusion, SYNC_OTHER_CANDIDATES);
+    if (!peaks.length || zM[peaks[0]] < SYNC_MIN_SNR) throw new SyncError("No other device heard");
+    const spread = Math.round(SYNC_DEVICES_SPREAD_S * analysisRate);
+    if (peaks.some(peak => Math.abs(peak - peaks[0]) > spread && zM[peak] >= SYNC_AMBIGUOUS_RATIO * zM[peaks[0]])) {
+        throw new SyncError("Couldn't tell where the other device is (repeating music or several devices), try again in a moment");
     }
-    if (!others.length) throw new SyncError("No other device heard");
+    const others = peaks.filter(peak => zM[peak] >= SYNC_OTHER_DEVICE_RATIO * zM[peaks[0]]);
 
     const ownPosition = own + parabolicOffset(zU, own);
     const offsetOf = peak => (peak + parabolicOffset(zM, peak) - shift - ownPosition) / analysisRate;
@@ -466,9 +468,26 @@ function correlate(x, referenceSpectrum, n, rate) {
     return xRe;
 }
 
-// normalizes the valid lags of a correlation to mean 0 and standard deviation 1, in place
-function zScores(correlation, validLength) {
-    const result = correlation.subarray(0, Math.max(0, validLength));
+// Divides each lag of a correlation by the energy of the reference part it was compared with.
+// Otherwise loud parts of the song match anything better than quiet parts match themselves.
+// Returns the valid lags (where the signal lies completely within the reference).
+function normalizeByEnergy(correlation, reference, length) {
+    const result = correlation.subarray(0, Math.max(0, reference.length - length + 1));
+    let total = 0;
+    for (const value of reference) total += value * value;
+    // near silent parts are not amplified beyond this, they would turn noise into matches
+    const floor = SYNC_ENERGY_FLOOR * total * length / reference.length + 1e-12;
+    let energy = 0;
+    for (let i = 0; i < length; i++) energy += reference[i] * reference[i];
+    for (let k = 0; k < result.length; k++) {
+        result[k] /= Math.sqrt(Math.max(energy, floor));
+        energy += (reference[k + length] ?? 0) ** 2 - reference[k] * reference[k];
+    }
+    return result;
+}
+
+// normalizes a correlation to mean 0 and standard deviation 1, in place
+function zScores(result) {
     let mean = 0;
     for (const value of result) mean += value;
     mean /= result.length;
