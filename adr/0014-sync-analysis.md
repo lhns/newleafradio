@@ -14,4 +14,6 @@ The analysis must stay exact in real rooms (reverb, noise, phone speakers) and m
 - Ambiguity: another match more than 0.5 s away that is at least 0.8× as strong rejects the result.
 
 ## Consequences
-In simulations with measured rooms and noise down to 0 dB SNR: no wrong shifts beyond ~20 ms except near-silent passages, about a third rejected at 0 dB. Tiled rooms (direct sound much weaker than reflections) are mostly 5–20 ms late or rejected. Not yet verified on real devices.
+In simulations with measured rooms and noise down to 0 dB SNR: no wrong shifts beyond ~20 ms except near-silent passages, about a third rejected at 0 dB. Tiled rooms (direct sound much weaker than reflections) are mostly 5–20 ms late or rejected.
+
+First real measurement (Firefox, Windows laptop, PR #29): the recording started with ~0.24 s of microphone silence and an output glitch, and this device scored only 6; recording from 0.5 s after the microphone's first sound (0013) it scores 23–25. The threshold of 18 for this device stays: with a wrong reference, a false match in its window scored 14 and disappeared when muted, so muting alone doesn't rule it out, and lowering the threshold to 15 adds 3 wrong shifts beyond 100 ms in the simulations.
