@@ -2,6 +2,8 @@
 // The microphone hears this device and the other devices. Both are located in a decoded slice of the song by
 // cross-correlation, and this device is told apart by muting it for the last part of the recording.
 // Microphone and output latency cancel out, because all devices are heard through the same microphone.
+// The analysis runs in a worker loading this file, so it doesn't block the page.
+// Uses onAbort from radio.js and CONTENT_TYPES from ipfs.js.
 
 const SYNC_WARMUP_S = 0.3;
 const SYNC_UNMUTED_S = 2;
@@ -16,34 +18,90 @@ const SYNC_BAND_HZ = [300, 7000];
 const SYNC_PHAT_BETA = 0.7;
 // this device is searched this close to where its playback position says it should be (output latency, inaccuracies)
 const SYNC_OWN_SEARCH_S = 1;
+const SYNC_OWN_CANDIDATES = 8;
+// a weaker match of this device is searched this close to the strongest match (another device)
+const SYNC_OWN_NEARBY_S = 0.5;
 // other devices are searched this close to this device, then once more in the wider range
 const SYNC_OTHER_SEARCH_S = [0.5, 1.5];
+const SYNC_OTHER_CANDIDATES = 5;
 const SYNC_PEAK_EXCLUSION_S = 0.01;
 // room reflections arrive up to this much later than the direct sound
 const SYNC_REFLECTION_S = 0.04;
 const SYNC_MIN_SNR = 7;
 const SYNC_OTHER_DEVICE_RATIO = 0.75;
+// a match counts as heard while muted if it is at least this strong relative to the strongest match of each part
+const SYNC_HEARD_WHILE_MUTED_RATIO = 0.5;
+// stricter for weaker matches of this device, which must be gone while muted
+const SYNC_OWN_GONE_WHILE_MUTED_RATIO = 0.25;
 // this device is looked for among weaker matches only down to this fraction of the strongest
 const SYNC_OWN_MIN_RELATIVE = 0.4;
 // a match of this device in sync with another device makes the song this much louder while unmuted
 const SYNC_OWN_GAIN_RATIO = 1.3;
+// samples the recorder collects before posting them to the main thread
+const SYNC_RECORDER_BLOCK = 2048;
 
 class SyncError extends Error {
 }
 
+const IS_SYNC_WORKER = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+const ACOUSTIC_SYNC_SCRIPT = IS_SYNC_WORKER ? self.location.href : document.currentScript.src;
+
+if (IS_SYNC_WORKER) {
+    self.onmessage = ({data}) => {
+        try {
+            self.postMessage({result: analyzeRecording(data)});
+        } catch (error) {
+            self.postMessage({error: {message: error.message, isSyncError: error instanceof SyncError}});
+        }
+    };
+}
+
+// runs analyzeRecording in a worker
+function analyzeInWorker(input, signal) {
+    return new Promise((resolve, reject) => {
+        const worker = new Worker(ACOUSTIC_SYNC_SCRIPT);
+        const finish = () => {
+            worker.terminate();
+            removeListener();
+        };
+        const removeListener = onAbort(signal, () => {
+            finish();
+            reject(signal.reason);
+        });
+        worker.onmessage = ({data}) => {
+            finish();
+            if (data.error) {
+                reject(data.error.isSyncError ? new SyncError(data.error.message) : new Error(data.error.message));
+            } else {
+                resolve(data.result);
+            }
+        };
+        worker.onerror = event => {
+            finish();
+            reject(new Error(event.message));
+        };
+        worker.postMessage(input);
+    });
+}
+
 // Returns {offset, others}: offset is how many seconds the loudest other device is ahead in the song,
 // others are the offsets of further devices that were heard.
+// getPosition returns the current song position, setMuted mutes this device.
 // Must be called from a user gesture (microphone permission, AudioContext).
-async function measureSongOffset(audio, src, signal) {
+async function measureSongOffset({src, duration, getPosition, setMuted, signal}) {
     if (!navigator.mediaDevices?.getUserMedia) {
         throw new SyncError("Microphone not available");
     }
     const context = new AudioContext();
     let stream = null;
     try {
+        const factor = analysisFactor(context.sampleRate);
         const recordingSeconds = SYNC_WARMUP_S + SYNC_UNMUTED_S + SYNC_GUARD_S + SYNC_MUTED_S;
-        const reference = loadReference(context, src, audio.currentTime, audio.duration, recordingSeconds, signal);
+        const reference = loadReference(src, getPosition(), duration, recordingSeconds, context.sampleRate / factor, signal);
         reference.catch(() => {
+        });
+        const recorderLoaded = context.audioWorklet.addModule("recorder-worklet.js");
+        recorderLoaded.catch(() => {
         });
 
         try {
@@ -54,49 +112,48 @@ async function measureSongOffset(audio, src, signal) {
             console.error(error);
             throw new SyncError("Microphone not available");
         }
-        signal?.throwIfAborted();
+        signal.throwIfAborted();
         await context.resume();
+        await recorderLoaded;
 
-        const recording = await record(context, stream, audio, signal);
+        const recording = await record(context, stream, getPosition, setMuted, signal);
         stream.getTracks().forEach(track => track.stop());
         stream = null;
 
         const {samples, startSeconds} = await reference;
-        return analyzeRecording({...recording, reference: samples, referenceStart: startSeconds, rate: context.sampleRate});
+        return await analyzeInWorker({...recording, reference: samples, referenceStart: startSeconds, rate: context.sampleRate}, signal);
     } finally {
-        audio.muted = false;
+        setMuted(false);
         stream?.getTracks().forEach(track => track.stop());
         context.close().catch(() => {
         });
     }
 }
 
-async function record(context, stream, audio, signal) {
-    await context.audioWorklet.addModule("recorder-worklet.js");
-    signal?.throwIfAborted();
+async function record(context, stream, getPosition, setMuted, signal) {
     const source = context.createMediaStreamSource(stream);
-    const recorder = new AudioWorkletNode(context, "recorder");
+    const recorder = new AudioWorkletNode(context, "recorder", {processorOptions: {blockSize: SYNC_RECORDER_BLOCK}});
 
     const chunks = [];
     let length = 0;
-    let waiting = null;
+    let onSamples = null;
     recorder.port.onmessage = ({data}) => {
         chunks.push(data);
         length += data.length;
-        if (waiting && length >= waiting.samples) waiting.resolve();
+        onSamples?.();
     };
     const waitForSamples = samples => new Promise((resolve, reject) => {
-        const onAbort = () => reject(signal.reason);
-        signal?.addEventListener("abort", onAbort, {once: true});
-        if (signal?.aborted) return onAbort();
-        waiting = {
-            samples, resolve: () => {
-                waiting = null;
-                signal?.removeEventListener("abort", onAbort);
-                resolve();
-            }
+        const removeListener = onAbort(signal, () => {
+            onSamples = null;
+            reject(signal.reason);
+        });
+        onSamples = () => {
+            if (length < samples) return;
+            onSamples = null;
+            removeListener();
+            resolve();
         };
-        if (length >= samples) waiting.resolve();
+        if (!signal.aborted) onSamples();
     });
 
     source.connect(recorder);
@@ -108,13 +165,13 @@ async function record(context, stream, audio, signal) {
         const unmutedEnd = unmutedStart + Math.round(SYNC_UNMUTED_S * rate);
         await waitForSamples(unmutedStart);
         // the song position when the unmuted part started
-        const position = audio.currentTime - (length - unmutedStart) / rate;
+        const position = getPosition() - (length - unmutedStart) / rate;
         await waitForSamples(unmutedEnd);
-        audio.muted = true;
+        setMuted(true);
         const mutedStart = length + Math.round(SYNC_GUARD_S * rate);
         const mutedEnd = mutedStart + Math.round(SYNC_MUTED_S * rate);
         await waitForSamples(mutedEnd);
-        audio.muted = false;
+        setMuted(false);
 
         const samples = new Float32Array(mutedEnd);
         let offset = 0;
@@ -136,85 +193,84 @@ async function record(context, stream, audio, signal) {
     }
 }
 
-// Decodes the part of the song around the given position as mono samples at the context's sample rate.
-// Returns {samples, startSeconds}, startSeconds being the (estimated) song position of the first sample.
-async function loadReference(context, src, position, duration, recordingSeconds, signal) {
-    const probe = await fetch(src, {headers: {range: "bytes=0-1"}, signal});
-    const type = probe.headers.get("content-type") || "";
-    const isMp3 = type.includes("mpeg") || /\.mp3$/i.test(src);
-    const total = Number(probe.headers.get("content-range")?.split("/")[1]);
-    // mp3 frames can be decoded from anywhere, so only the bytes around the position are needed
-    const mp3Range = size => {
-        const bytesPerSecond = size / duration;
-        const start = Math.max(0, Math.floor((position - SYNC_REFERENCE_MARGIN_S) * bytesPerSecond));
-        const end = Math.min(size, Math.ceil((position + recordingSeconds + SYNC_REFERENCE_MARGIN_S) * bytesPerSecond));
-        return [start, end];
-    };
+async function fetchSong(src, init) {
+    const response = await fetch(src, init);
+    if (!response.ok) throw new SyncError(`Error loading the song: ${response.status}`);
+    return response;
+}
 
-    let bytes;
-    let startSeconds = 0;
-    if (probe.status === 206 && total) {
+// Decodes the part of the song around the given position as mono samples at the given rate.
+// Returns {samples, startSeconds}, startSeconds being the (estimated) song position of the first sample.
+async function loadReference(src, position, duration, recordingSeconds, rate, signal) {
+    // [start, end) of the needed part of the song, in units of unitsPerSecond
+    const around = (unitsPerSecond, size) => [
+        Math.max(0, Math.floor((position - SYNC_REFERENCE_MARGIN_S) * unitsPerSecond)),
+        Math.min(size, Math.ceil((position + recordingSeconds + SYNC_REFERENCE_MARGIN_S) * unitsPerSecond))
+    ];
+
+    const probe = await fetchSong(src, {headers: {range: "bytes=0-1"}, signal});
+    // mp3 frames can be decoded from anywhere, so only the bytes around the position are needed
+    const isMp3 = (probe.headers.get("content-type") || "").startsWith(CONTENT_TYPES.mp3);
+    let response = probe;
+    let size = Number(probe.headers.get("content-range")?.split("/")[1]);
+    if (probe.status === 206 && size) {
         probe.body?.cancel().catch(() => {
         });
-        if (isMp3) {
-            const [start, end] = mp3Range(total);
-            startSeconds = start / total * duration;
-            const response = await fetch(src, {headers: {range: `bytes=${start}-${end - 1}`}, signal});
-            if (!response.ok) throw new SyncError(`Error loading the song: ${response.status}`);
-            bytes = await response.arrayBuffer();
-            if (response.status === 200) bytes = bytes.slice(start, end);
-        } else {
-            if (total > SYNC_MAX_WHOLE_FILE_BYTES) throw new SyncError("This song is too large to sync");
-            const response = await fetch(src, {signal});
-            if (!response.ok) throw new SyncError(`Error loading the song: ${response.status}`);
-            bytes = await response.arrayBuffer();
-        }
-    } else {
-        // e.g. blob URLs, which ignore the range: the whole file is in memory anyway
-        if (!probe.ok) throw new SyncError(`Error loading the song: ${probe.status}`);
-        bytes = await probe.arrayBuffer();
-        if (isMp3) {
-            const [start, end] = mp3Range(bytes.byteLength);
-            startSeconds = start / bytes.byteLength * duration;
-            bytes = bytes.slice(start, end);
-        }
+        if (!isMp3 && size > SYNC_MAX_WHOLE_FILE_BYTES) throw new SyncError("This song is too large to sync");
+        const [start, end] = around(size / duration, size);
+        response = await fetchSong(src, isMp3 ? {headers: {range: `bytes=${start}-${end - 1}`}, signal} : {signal});
     }
-    signal?.throwIfAborted();
+    // e.g. blob URLs ignore the range: the whole file is in memory anyway
+    let bytes = await response.arrayBuffer();
+    size ||= bytes.byteLength;
+    let startSeconds = 0;
+    if (isMp3) {
+        const [start, end] = around(size / duration, size);
+        startSeconds = start / size * duration;
+        if (bytes.byteLength === size) bytes = bytes.slice(start, end);
+    }
+    signal.throwIfAborted();
 
     let buffer;
     try {
-        buffer = await context.decodeAudioData(bytes);
+        // decoded at the analysis rate right away, which keeps whole songs small
+        buffer = await new OfflineAudioContext(1, 1, rate).decodeAudioData(bytes);
     } catch (error) {
         console.error(error);
         throw new SyncError("The song could not be decoded for syncing");
     }
-    signal?.throwIfAborted();
+    signal.throwIfAborted();
 
-    let start = 0;
-    let end = buffer.length;
+    let [start, end] = [0, buffer.length];
     if (!isMp3) {
-        // the whole file was decoded, so only the part around the position is kept
-        start = Math.max(0, Math.floor((position - SYNC_REFERENCE_MARGIN_S) * buffer.sampleRate));
-        startSeconds = start / buffer.sampleRate;
-        end = Math.min(buffer.length, Math.ceil((position + recordingSeconds + SYNC_REFERENCE_MARGIN_S) * buffer.sampleRate));
+        // the whole song was decoded, so only the part around the position is kept
+        [start, end] = around(rate, buffer.length);
+        startSeconds = start / rate;
     }
     const mono = new Float32Array(Math.max(0, end - start));
     for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
         const data = buffer.getChannelData(channel);
-        for (let i = 0; i < mono.length; i++) mono[i] += data[start + i] / buffer.numberOfChannels;
+        for (let i = 0; i < mono.length; i++) mono[i] += data[start + i];
     }
+    for (let i = 0; i < mono.length; i++) mono[i] /= buffer.numberOfChannels;
     return {samples: mono, startSeconds};
 }
 
+// the microphone recording is decimated by this factor for the analysis
+function analysisFactor(rate) {
+    return Math.max(1, Math.round(rate / SYNC_ANALYSIS_RATE));
+}
+
 // Finds this device (heard only in the unmuted part) and the other devices (heard in both parts) in the reference.
+// unmuted and muted are recorded at rate, the reference at rate / analysisFactor(rate).
 // mutedDelay is the number of samples from the start of the unmuted to the start of the muted part,
 // position the song position at the start of the unmuted part and referenceStart the one of the reference.
 function analyzeRecording({unmuted, muted, mutedDelay, position, reference, referenceStart, rate}) {
-    const factor = Math.max(1, Math.round(rate / SYNC_ANALYSIS_RATE));
+    const factor = analysisFactor(rate);
     const analysisRate = rate / factor;
     const u = decimate(unmuted, factor);
     const m = decimate(muted, factor);
-    const s = decimate(reference, factor);
+    const s = reference;
     const shift = Math.round(mutedDelay / factor);
     if (s.length < Math.max(u.length, m.length) + 2) throw new SyncError("The song could not be loaded for syncing");
 
@@ -224,6 +280,7 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     const zM = zScores(correlate(m, referenceSpectrum, n, analysisRate), s.length - m.length + 1);
     const exclusion = Math.round(SYNC_PEAK_EXCLUSION_S * analysisRate);
     const reflections = Math.round(SYNC_REFLECTION_S * analysisRate);
+    const nearby = Math.round(SYNC_OWN_NEARBY_S * analysisRate);
     const window = (center, seconds, length) => {
         const radius = Math.round(seconds * analysisRate);
         return [Math.max(0, center - radius), Math.min(length - 1, center + radius)];
@@ -233,22 +290,21 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     const expected = Math.round((position - referenceStart) * analysisRate);
     const [ownFrom, ownTo] = window(expected, SYNC_OWN_SEARCH_S, zU.length);
     if (ownFrom > ownTo) throw new SyncError("The song could not be loaded for syncing");
-    const candidates = findPeaks(zU, ownFrom, ownTo, exclusion, 8);
+    const candidates = findPeaks(zU, ownFrom, ownTo, exclusion, SYNC_OWN_CANDIDATES);
     if (!candidates.length || zU[candidates[0]] < SYNC_MIN_SNR) {
         throw new SyncError("Couldn't hear the song, turn the volume up");
     }
     const strongest = candidates[0];
     // a match is heard while muted if the muted part has a comparably strong match at the same position,
     // relative to the strongest match of each part, because the two parts' scores aren't comparable directly
-    let mutedMax = 1e-9;
-    for (let k = ownFrom + shift; k <= Math.min(ownTo + shift, zM.length - 1); k++) mutedMax = Math.max(mutedMax, zM[k]);
-    const heardWhileMuted = (peak, factor) => peak + shift < zM.length
-        && maxAround(zM, peak + shift, 2) / mutedMax >= factor * zU[peak] / zU[strongest];
+    const mutedMax = Math.max(maxIn(zM, ownFrom + shift, ownTo + shift), 1e-9);
+    const heardWhileMuted = (peak, ratio) => peak + shift < zM.length
+        && maxIn(zM, peak + shift - 2, peak + shift + 2) / mutedMax >= ratio * zU[peak] / zU[strongest];
     // how much louder the song is while unmuted, relative to the reference at the matched positions
     const gain = (signal, at) => rms(signal, 0, signal.length) / Math.max(rms(s, at, signal.length), 1e-9);
 
     let own;
-    if (!heardWhileMuted(strongest, 0.5)) {
+    if (!heardWhileMuted(strongest, SYNC_HEARD_WHILE_MUTED_RATIO)) {
         own = strongest;
     } else if (gain(u, strongest) >= SYNC_OWN_GAIN_RATIO * gain(m, strongest + shift)) {
         // the strongest match is louder while this device plays: it is in sync with the other device
@@ -256,9 +312,9 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     } else {
         // the strongest match is another device: this device is a weaker match nearby that is gone while muted,
         // but not within the other device's reflections, which can't be told apart reliably
-        const nearby = Math.round(SYNC_OTHER_SEARCH_S[0] * analysisRate);
         own = candidates.find(peak => Math.abs(peak - strongest) <= nearby && Math.abs(peak - strongest) > reflections
-            && zU[peak] >= SYNC_MIN_SNR && zU[peak] >= SYNC_OWN_MIN_RELATIVE * zU[strongest] && !heardWhileMuted(peak, 0.25));
+            && zU[peak] >= SYNC_MIN_SNR && zU[peak] >= SYNC_OWN_MIN_RELATIVE * zU[strongest]
+            && !heardWhileMuted(peak, SYNC_OWN_GONE_WHILE_MUTED_RATIO));
     }
     if (own === undefined) throw new SyncError("Couldn't hear this device's own speaker, turn the volume up");
 
@@ -266,7 +322,7 @@ function analyzeRecording({unmuted, muted, mutedDelay, position, reference, refe
     let others = [];
     for (const seconds of SYNC_OTHER_SEARCH_S) {
         const [from, to] = window(own + shift, seconds, zM.length);
-        const peaks = findPeaks(zM, from, to, exclusion, 5);
+        const peaks = findPeaks(zM, from, to, exclusion, SYNC_OTHER_CANDIDATES);
         if (peaks.length && zM[peaks[0]] >= SYNC_MIN_SNR) {
             others = peaks.filter(peak => zM[peak] >= SYNC_OTHER_DEVICE_RATIO * zM[peaks[0]]);
             break;
@@ -286,9 +342,10 @@ function rms(signal, from, length) {
     return Math.sqrt(sum / Math.max(1, to - from));
 }
 
-function maxAround(values, k, radius) {
+// maximum of values[from..to], clamped to the array
+function maxIn(values, from, to) {
     let max = -Infinity;
-    for (let i = Math.max(0, k - radius); i <= Math.min(values.length - 1, k + radius); i++) max = Math.max(max, values[i]);
+    for (let i = Math.max(0, from); i <= Math.min(values.length - 1, to); i++) max = Math.max(max, values[i]);
     return max;
 }
 
@@ -339,9 +396,9 @@ function correlate(x, referenceSpectrum, n, rate) {
     return xRe;
 }
 
-// normalizes the valid lags of a correlation to mean 0 and standard deviation 1
+// normalizes the valid lags of a correlation to mean 0 and standard deviation 1, in place
 function zScores(correlation, validLength) {
-    const result = correlation.slice(0, Math.max(0, validLength));
+    const result = correlation.subarray(0, Math.max(0, validLength));
     let mean = 0;
     for (const value of result) mean += value;
     mean /= result.length;
@@ -381,8 +438,12 @@ function fft(re, im, inverse) {
         for (; j & bit; bit >>= 1) j ^= bit;
         j ^= bit;
         if (i < j) {
-            [re[i], re[j]] = [re[j], re[i]];
-            [im[i], im[j]] = [im[j], im[i]];
+            let swap = re[i];
+            re[i] = re[j];
+            re[j] = swap;
+            swap = im[i];
+            im[i] = im[j];
+            im[j] = swap;
         }
     }
     for (let size = 2; size <= n; size *= 2) {
