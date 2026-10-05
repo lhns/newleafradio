@@ -1,7 +1,7 @@
 # 0014. How the sync analysis finds the devices
 
 - Status: Accepted
-- Date: 2026-10-05 (PRs #10, #14, #19, #21)
+- Date: 2026-10-05 (PRs #10, #14, #19, #21, #28)
 
 ## Context
 The analysis must stay exact in real rooms (reverb, noise, phone speakers) and must never shift by a wrong amount; a rejection is acceptable.
