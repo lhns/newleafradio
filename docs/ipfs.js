@@ -78,6 +78,9 @@ async function resetVerifiedFetch(broken) {
 
 // warns if a download didn't receive data for this long
 const IPFS_SLOW_MS = 10 * 1000;
+// fails a download that didn't receive data for this long. Requests for a block join a pending request for the
+// same block, so a stuck block request would also stall every retry, which is why verifiedFetch is replaced.
+const IPFS_STUCK_MS = 30 * 1000;
 
 // Fetches ipfs://<cidPath>, optionally only a byte range ("bytes=start-end").
 // Aborting the signal cancels the download.
@@ -111,11 +114,24 @@ async function fetchIpfs(cidPath, {range, signal} = {}) {
         const reader = body.getReader();
         let bytes = 0;
         let finished = false;
-        let lastData = Date.now();
+        // when the pending read started, null while nothing is requested (e.g. the player has buffered enough)
+        let readStart = null;
+        let lastWarning = 0;
+        let streamController;
         const slowTimer = setInterval(() => {
-            if (Date.now() - lastData > IPFS_SLOW_MS) {
-                console.warn(`IPFS: no data for ${((Date.now() - lastData) / 1000).toFixed(0)} s while loading ${name} (${bytes} bytes so far)`);
-                lastData = Date.now();
+            if (readStart === null) return;
+            const idle = Date.now() - readStart;
+            if (idle > IPFS_STUCK_MS) {
+                const error = new Error(`IPFS: no data for ${(idle / 1000).toFixed(0)} s while loading ${name} (${bytes} bytes so far), giving up`);
+                if (!finish("stuck")) return;
+                console.error(error.message);
+                resetVerifiedFetch(verifiedFetchP);
+                reader.cancel(error).catch(() => {
+                });
+                streamController.error(error);
+            } else if (idle > IPFS_SLOW_MS && Date.now() - lastWarning > IPFS_SLOW_MS) {
+                console.warn(`IPFS: no data for ${(idle / 1000).toFixed(0)} s while loading ${name} (${bytes} bytes so far)`);
+                lastWarning = Date.now();
             }
         }, 1000);
         const finish = message => {
@@ -135,9 +151,14 @@ async function fetchIpfs(cidPath, {range, signal} = {}) {
             if (signal.aborted) cancel(signal.reason);
         }
         body = new ReadableStream({
+            start(controller) {
+                streamController = controller;
+            },
             async pull(controller) {
                 try {
+                    readStart = Date.now();
                     const {done, value} = await reader.read();
+                    readStart = null;
                     // the stream was cancelled while reading
                     if (finished) return;
                     if (done) {
@@ -145,7 +166,6 @@ async function fetchIpfs(cidPath, {range, signal} = {}) {
                         controller.close();
                     } else {
                         bytes += value.length;
-                        lastData = Date.now();
                         controller.enqueue(value);
                     }
                 } catch (error) {
