@@ -1,6 +1,6 @@
 # 0002. Synchronize playback to the wall clock
 
-- Status: Accepted, extended by [0012](0012-converging-sync.md) and [0013](0013-acoustic-sync-button.md)
+- Status: Accepted, extended by [0013](0013-acoustic-sync-button.md) and [0017](0017-jump-only-sync.md)
 - Date: 2024-07-30
 
 ## Context

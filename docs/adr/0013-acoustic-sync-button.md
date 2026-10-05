@@ -9,7 +9,7 @@ Wall-clock sync (0002) leaves devices tens of ms to seconds apart (clock offsets
 ## Decision
 A manual "Sync with nearby device" button that listens to the music:
 - It records ~4 s from the microphone (echo cancellation, noise suppression and auto gain off), the last 2 s with this device muted, and cross-correlates the recording with the decoded song.
-- The peak that disappears when muted is this device; the strongest remaining peak is the other device. Their distance is the offset, applied to `syncOffset` and corrected via 0012.
+- The peak that disappears when muted is this device; the strongest remaining peak is the other device. Their distance is the offset, applied to `syncOffset` and corrected via 0017.
 - Only the device being synced needs the new code; nothing is emitted.
 - Several devices: keep one as anchor and press Sync on the others; it syncs to the loudest one and reports the others.
 

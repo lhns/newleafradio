@@ -20,12 +20,10 @@ let maxVolume = 1;
 let audioContext = null;
 // seconds this device's playback is shifted from the wall clock, measured by the sync button
 let syncOffset = 0;
-// differences from the intended song position smaller than this are not corrected
-const SYNC_TOLERANCE_S = 0.003;
-// larger differences seek, smaller ones (and the time lost seeking) are made up by playing faster or slower
-const SYNC_SEEK_THRESHOLD_S = 0.25;
-const SYNC_RATE_CHANGE = 0.05;
-// a seek pauses the playback until the new position is loaded; seeking again right after would land late again
+// differences from the intended song position at least this large are corrected by seeking.
+// the tempo is never changed to catch up, that is audible
+const SYNC_JUMP_THRESHOLD_S = 0.03;
+// automatic syncs seek at most this often, so a slow network doesn't keep the playback seeking
 const SYNC_SEEK_INTERVAL_MS = 10 * 1000;
 // the lag between the playback and the intended position is averaged over this many readings, 10 ms apart
 const SYNC_LAG_READINGS = 10;
@@ -268,7 +266,10 @@ async function promote(session, audio) {
     if (session.showProgress) setLoading(false);
 
     audio.muted = false;
-    fadeTo(audio, () => maxVolume, session.signal).catch(() => {
+    // the playback can still shift while it starts up, so it is synchronized again once it is faded in
+    fadeTo(audio, () => maxVolume, session.signal).then(() => {
+        if (!audio.syncController) return syncAudio(audio, session.signal);
+    }).catch(() => {
     });
 
     // e.g. the stream broke or stalled after playback started
@@ -309,15 +310,17 @@ function createAudio(src, startAt, signal) {
         if (Number.isFinite(audio.duration)) audio.currentTime = songPosition(audio.duration, startAt.getTime() / 1000);
     }, {once: true});
 
-    // synchronize the playback to the current second of the hour, also after it paused to buffer
-    audio.addEventListener("playing", () => syncAudio(audio, signal).catch(() => {
-    }));
+    // synchronize the playback to the current second of the hour, also after it paused to buffer.
+    // a running sync is left alone, its own seeks pause the playback too
+    audio.addEventListener("playing", () => {
+        if (!audio.syncController) syncAudio(audio, signal).catch(() => {
+        });
+    });
     return audio;
 }
 
-// Brings the playback to the song position of the current time.
-// Large differences are seeked. Seeking pauses the playback until the new position is loaded,
-// so the time lost (and small differences) are made up by playing slightly faster or slower.
+// Brings the playback to the song position of the current time by seeking.
+// A seek pauses the playback until the new position is loaded, so it aims ahead by the time the last seek landed late.
 async function syncAudio(audio, signal) {
     const duration = audio.duration;
     if (!Number.isFinite(duration) || duration <= 0) return;
@@ -326,53 +329,50 @@ async function syncAudio(audio, signal) {
     const controller = new AbortController();
     audio.syncController = controller;
     const removeListener = onAbort(signal, () => controller.abort());
-    // the latency estimate fluctuates, so it is read once
-    const latency = outputLatency();
     // positive if the playback is behind
-    const lagNow = () => signedWrap(songPosition(duration, Date.now() / 1000, latency) - audio.currentTime, duration);
-    // currentTime advances in steps of up to ~20 ms, so the lag is averaged over the last readings
-    const readings = [];
-    const lag = () => {
-        readings.push(lagNow());
-        if (readings.length > SYNC_LAG_READINGS) readings.shift();
-        return readings.reduce((sum, value) => sum + value, 0) / readings.length;
-    };
+    const lagNow = latency => signedWrap(songPosition(duration, Date.now() / 1000, latency) - audio.currentTime, duration);
+    // currentTime advances in steps of up to ~20 ms, so the lag is averaged over several readings.
+    // the latency estimate fluctuates (and is 0 until the output started), so it is read once per measurement
     const measureLag = async () => {
-        readings.length = 0;
+        const latency = outputLatency();
+        let sum = lagNow(latency);
         for (let i = 1; i < SYNC_LAG_READINGS; i++) {
-            lag();
             await sleep(10, controller.signal);
+            sum += lagNow(latency);
         }
-        return lag();
+        return sum / SYNC_LAG_READINGS;
     };
+    // returns the lag after the playback continued, or null if it didn't
+    const seek = async () => {
+        const target = songPosition(duration, Date.now() / 1000 + (audio.seekDelay ?? 0));
+        audio.currentTime = target;
+        await waitForMedia(audio, "seeked", controller.signal);
+        // the playback only continues once the new position is loaded
+        for (let i = 0; i < 100 && Math.abs(signedWrap(audio.currentTime - target, duration)) < 0.05; i++) {
+            await sleep(20, controller.signal);
+        }
+        if (Math.abs(signedWrap(audio.currentTime - target, duration)) < 0.05) return null;
+        const lag = await measureLag();
+        audio.seekDelay = (audio.seekDelay ?? 0) + lag;
+        console.log(`Seeked to ${target.toFixed(3)} s, landed ${formatMs(lag)} off`);
+        return lag;
+    };
+    // the sync button pauses syncs while it listens
+    const outOfSync = lag => lag !== null && Math.abs(lag) >= SYNC_JUMP_THRESHOLD_S && !audio.syncPaused;
     try {
-        if (Math.abs(await measureLag()) > SYNC_SEEK_THRESHOLD_S && Date.now() - (audio.lastSeek ?? 0) > SYNC_SEEK_INTERVAL_MS) {
-            audio.lastSeek = Date.now();
-            const target = songPosition(duration, Date.now() / 1000, latency);
-            audio.currentTime = target;
-            console.log(`Seeked to ${target.toFixed(3)} s`);
-            await waitForMedia(audio, "seeked", controller.signal);
-            // the playback only continues once the new position is loaded
-            for (let i = 0; i < 100 && Math.abs(signedWrap(audio.currentTime - target, duration)) < 0.05; i++) {
-                await sleep(20, controller.signal);
-            }
+        if (!outOfSync(await measureLag())) return;
+        // seeks are spaced out, a sync right after one waits for its turn
+        const wait = (audio.lastSeek ?? 0) + SYNC_SEEK_INTERVAL_MS - Date.now();
+        if (wait > 0) {
+            await sleep(wait, controller.signal);
+            if (!outOfSync(await measureLag())) return;
         }
-
-        const initialLag = await measureLag();
-        if (Math.abs(initialLag) <= SYNC_TOLERANCE_S) return;
-        const direction = Math.sign(initialLag);
-        // changing the rate also costs a little time, so the lag is measured against the clock until it is made up
-        const deadline = Date.now() + (1.5 * Math.abs(initialLag) / SYNC_RATE_CHANGE + 2) * 1000;
-        audio.playbackRate = 1 + direction * SYNC_RATE_CHANGE;
-        try {
-            while (lag() * direction > SYNC_TOLERANCE_S && Date.now() < deadline) {
-                await sleep(10, controller.signal);
-            }
-        } finally {
-            if (audio.syncController === controller) audio.playbackRate = 1;
-        }
+        audio.lastSeek = Date.now();
+        // a seek that still lands off is repeated once, aiming ahead by the updated delay
+        if (outOfSync(await seek())) await seek();
     } finally {
         removeListener();
+        if (audio.syncController === controller) audio.syncController = null;
     }
 }
 
@@ -407,17 +407,25 @@ async function syncWithNearbyDevice() {
     button.disabled = true;
     setSyncStatus("Listening...");
     try {
-        const {offset, others} = await measureSongOffset({
-            src: audio.currentSrc,
-            duration: audio.duration,
-            getPosition: () => audio.currentTime,
-            setMuted: muted => audio.muted = muted,
-            signal: session.signal
-        });
+        let measurement;
+        // automatic syncs would move the playback while it is recorded
+        audio.syncPaused = true;
+        try {
+            measurement = await measureSongOffset({
+                src: audio.currentSrc,
+                duration: audio.duration,
+                getPosition: () => audio.currentTime,
+                setMuted: muted => audio.muted = muted,
+                signal: session.signal
+            });
+        } finally {
+            audio.syncPaused = false;
+        }
+        const {offset, others} = measurement;
         session.signal.throwIfAborted();
         const offsetText = formatMs(offset);
         let status;
-        if (Math.abs(offset) < SYNC_TOLERANCE_S) {
+        if (Math.abs(offset) < SYNC_JUMP_THRESHOLD_S) {
             status = `Already in sync (${offsetText})`;
         } else {
             await shiftPlayback(audio, offset, session.signal);
