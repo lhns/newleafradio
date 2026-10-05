@@ -84,6 +84,9 @@ async function getServiceWorkerUrl(url, {allowServiceWorker = true, signal, onPr
     if (allowServiceWorker && navigator.serviceWorker?.controller) {
         return url;
     }
+    if (allowServiceWorker) {
+        console.warn("No service worker controls this page (e.g. after a hard reload or in a private window), so the whole file is downloaded before it can be used");
+    }
 
     const request = new Request(url, {signal});
     const response = await (handleServiceWorkerRequest(request) ?? fetch(request));
