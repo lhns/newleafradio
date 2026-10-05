@@ -15,6 +15,13 @@ let filePathPrefix = "Normal";
 let currentGame = "NewHorizons";
 let maxVolume = 1;
 let audioContext = null;
+// seconds this device's playback is shifted from the wall clock, measured by the sync button
+let syncOffset = 0;
+// shifts smaller than this are not applied
+const SYNC_TOLERANCE_S = 0.003;
+// larger shifts seek, smaller ones (and the time lost seeking) are made up by playing faster or slower
+const SYNC_SEEK_THRESHOLD_S = 0.25;
+const SYNC_RATE_CHANGE = 0.05;
 
 // A session loads and plays one song. Aborting its signal cancels everything it started
 // (weather requests, downloads, timers, fades) and tears down its audio element.
@@ -170,6 +177,7 @@ async function loadAndPlay(session, signal) {
         showProgress(session, Math.trunc(p * 100) + "%");
     });
 
+    session.src = src;
     const audio = createAudio(src, session.startAt, signal);
     showProgress(session, "Connecting");
     audio.addEventListener("loadedmetadata", () => showProgress(session, "Buffering"), {once: true});
@@ -296,11 +304,11 @@ function createAudio(src, startAt, signal) {
     }, {once: true});
 
     // synchronize the playback to the current second of hour
-    let lastSync = 0;
+    audio.lastSync = 0;
     audio.addEventListener("playing", () => {
         const nowSeconds = Date.now() / 1000;
-        if (nowSeconds - lastSync > 10) {
-            lastSync = nowSeconds;
+        if (nowSeconds - audio.lastSync > 10) {
+            audio.lastSync = nowSeconds;
             const secondOffset = syncAudio(audio, nowSeconds);
             console.log("Track offset: " + secondOffset + "s");
         }
@@ -310,12 +318,111 @@ function createAudio(src, startAt, signal) {
 
 function syncAudio(audio, nowSeconds) {
     if (!Number.isFinite(audio.duration) || audio.duration <= 0) return null;
-    // the sound we play now is heard after the output latency
-    const latency = audioContext?.outputLatency || 0;
-    const secondOfHour = (nowSeconds + latency) % 3600;
-    const secondOffset = secondOfHour % audio.duration;
+    const secondOffset = songPosition(audio.duration, nowSeconds);
     audio.currentTime = secondOffset;
     return secondOffset;
+}
+
+// the position in the song that should be audible at the given time
+function songPosition(duration, nowSeconds) {
+    // the sound we play now is heard after the output latency
+    const latency = audioContext?.outputLatency || 0;
+    const secondOfHour = (nowSeconds + latency + syncOffset) % 3600;
+    return wrap(secondOfHour % duration, duration);
+}
+
+function wrap(value, length) {
+    return ((value % length) + length) % length;
+}
+
+// wraps into [-length / 2, length / 2)
+function signedWrap(value, length) {
+    return wrap(value + length / 2, length) - length / 2;
+}
+
+async function syncWithNearbyDevice() {
+    const session = currentSession;
+    const audio = session?.audio;
+    if (!radioOn || !audio || !Number.isFinite(audio.duration)) {
+        setSyncStatus("Start the radio first");
+        return;
+    }
+    const button = $('#sync')[0];
+    button.disabled = true;
+    setSyncStatus("Listening...");
+    try {
+        const {offset, others} = await measureSongOffset(audio, session.src, session.signal);
+        session.signal.throwIfAborted();
+        const offsetText = formatMs(offset);
+        let status;
+        if (Math.abs(offset) < SYNC_TOLERANCE_S) {
+            status = `Already in sync (${offsetText})`;
+        } else {
+            await shiftPlayback(audio, offset, session.signal);
+            status = `Shifted by ${offsetText}`;
+        }
+        if (others.length) {
+            status += `. ${others.length + 1} other devices heard, the others are ${others.map(other => formatMs(other - offset)).join(", ")} apart`;
+        }
+        setSyncStatus(status);
+    } catch (error) {
+        if (session.signal.aborted) {
+            setSyncStatus("");
+        } else {
+            console.error(error);
+            setSyncStatus(error instanceof SyncError ? error.message : "Sync failed");
+        }
+    } finally {
+        button.disabled = false;
+    }
+}
+
+// Shifts the playback by offset seconds and keeps the shift for later songs.
+// Seeking pauses the playback until the new position is loaded, so the time lost (and small shifts)
+// are made up by playing slightly faster or slower instead.
+async function shiftPlayback(audio, offset, signal) {
+    const duration = audio.duration;
+    const startTime = Date.now() / 1000;
+    const startPosition = audio.currentTime + offset;
+    const lag = () => signedWrap(startPosition + Date.now() / 1000 - startTime - audio.currentTime, duration);
+    // later syncs (e.g. after buffering, the next song) follow the shifted timeline
+    syncOffset += signedWrap(startPosition - songPosition(duration, startTime), duration);
+    // the regular sync on "playing" would seek again
+    audio.lastSync = startTime;
+
+    if (Math.abs(offset) > SYNC_SEEK_THRESHOLD_S) {
+        const target = wrap(startPosition, duration);
+        audio.currentTime = target;
+        await waitForMedia(audio, "seeked", signal);
+        // the playback only continues once the new position is loaded
+        for (let i = 0; i < 100 && Math.abs(signedWrap(audio.currentTime - target, duration)) < 0.05; i++) {
+            await sleep(20, signal);
+        }
+    }
+
+    // play faster or slower until the lag is made up, measured against the clock,
+    // because changing the rate also costs a little time
+    const direction = Math.sign(lag());
+    if (Math.abs(lag()) > SYNC_TOLERANCE_S) {
+        const deadline = Date.now() + 3 * Math.abs(lag()) / SYNC_RATE_CHANGE * 1000 + 2000;
+        audio.playbackRate = 1 + direction * SYNC_RATE_CHANGE;
+        try {
+            while (lag() * direction > SYNC_TOLERANCE_S && Date.now() < deadline) {
+                await sleep(10, signal);
+            }
+        } finally {
+            audio.playbackRate = 1;
+        }
+    }
+}
+
+function formatMs(seconds) {
+    const ms = Math.round(seconds * 1000);
+    return `${ms >= 0 ? "+" : ""}${ms} ms`;
+}
+
+function setSyncStatus(text) {
+    $('#sync-status')[0].textContent = text;
 }
 
 function fadeTo(audio, getTarget, signal) {
