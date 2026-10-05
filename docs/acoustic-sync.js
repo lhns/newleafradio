@@ -105,7 +105,7 @@ function analyzeInWorker(input, signal) {
 // others are the offsets of further devices that were heard.
 // getPosition returns the current song position, setMuted mutes this device.
 // Must be called from a user gesture (microphone permission, AudioContext).
-async function measureSongOffset({src, duration, getPosition, setMuted, signal}) {
+async function measureSongOffset({src, getPosition, setMuted, signal}) {
     if (!navigator.mediaDevices?.getUserMedia) {
         throw new SyncError("Microphone not available");
     }
@@ -114,7 +114,7 @@ async function measureSongOffset({src, duration, getPosition, setMuted, signal})
     try {
         const factor = analysisFactor(context.sampleRate);
         const recordingSeconds = SYNC_WARMUP_S + SYNC_UNMUTED_S + SYNC_GUARD_S + SYNC_MUTED_S;
-        const reference = loadReference(src, getPosition(), duration, recordingSeconds, context.sampleRate / factor, signal);
+        const reference = loadReference(src, getPosition(), recordingSeconds, context.sampleRate / factor, signal);
         reference.catch(() => {
         });
         const recorderLoaded = context.audioWorklet.addModule("recorder-worklet.js");
@@ -246,13 +246,9 @@ async function fetchSong(src, init) {
 }
 
 // Decodes the part of the song around the given position as mono samples at the given rate.
-// Returns {samples, startSeconds}, startSeconds being the (estimated) song position of the first sample.
-async function loadReference(src, position, duration, recordingSeconds, rate, signal) {
-    // [start, end) of the needed part of the song, in units of unitsPerSecond
-    const around = (unitsPerSecond, size) => [
-        Math.max(0, Math.floor((position - SYNC_REFERENCE_MARGIN_S) * unitsPerSecond)),
-        Math.min(size, Math.ceil((position + recordingSeconds + SYNC_REFERENCE_MARGIN_S) * unitsPerSecond))
-    ];
+// Returns {samples, startSeconds}, startSeconds being the song position of the first sample.
+async function loadReference(src, position, recordingSeconds, rate, signal) {
+    const [from, to] = [position - SYNC_REFERENCE_MARGIN_S, position + recordingSeconds + SYNC_REFERENCE_MARGIN_S];
 
     const probe = await fetchSong(src, {headers: {range: "bytes=0-1"}, signal});
     const size = Number(probe.headers.get("content-range")?.split("/")[1]);
@@ -271,19 +267,18 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
         return new Uint8Array(await response.arrayBuffer());
     };
 
-    // mp3 frames can be decoded from anywhere, so only the bytes around the position are needed
+    // mp3 frames can be decoded from anywhere, so only the frames around the position are needed
     const frames = await mp4Mp3Frames(read, fileSize);
     let bytes;
     let startSeconds = 0;
     if (frames) {
-        const length = frames.end - frames.start;
-        const [start, end] = around(length / duration, length);
-        bytes = await read(frames.start + start, frames.start + end);
-        // some browsers (Firefox) only decode data that starts with a frame
-        const skipped = start > 0 ? mp3FrameStart(bytes) : 0;
-        if (skipped < 0) throw new SyncError("The song could not be decoded for syncing");
-        bytes = bytes.slice(skipped);
-        startSeconds = (start + skipped) / length * duration;
+        const {offsets, sizes, times} = frames;
+        let first = 0;
+        while (first + 1 < times.length && times[first + 1] <= from) first++;
+        let last = first;
+        while (last + 1 < times.length && times[last] < to) last++;
+        bytes = (await read(offsets[first], offsets[last] + sizes[last])).slice();
+        startSeconds = times[first];
     } else {
         if (fileSize > SYNC_MAX_WHOLE_FILE_BYTES) throw new SyncError("This song is too large to sync");
         bytes = (whole ?? await read(0, fileSize)).slice();
@@ -303,7 +298,7 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     let [start, end] = [0, buffer.length];
     if (!frames) {
         // the whole song was decoded, so only the part around the position is kept
-        [start, end] = around(rate, buffer.length);
+        [start, end] = [Math.max(0, Math.floor(from * rate)), Math.min(end, Math.ceil(to * rate))];
         startSeconds = start / rate;
     }
     const mono = new Float32Array(Math.max(0, end - start));
@@ -315,61 +310,127 @@ async function loadReference(src, position, duration, recordingSeconds, rate, si
     return {samples: mono, startSeconds};
 }
 
-// [start, end) of the mp3 frames in an MP4 file, which are stored back to back in its mdat box, or null (e.g. AAC)
+// The frames of the mp3 track of an MP4 file from its sample tables, or null (e.g. AAC):
+// {offsets, sizes, times}, times being the song positions of the frames (like currentTime, after the edit list).
 async function mp4Mp3Frames(read, fileSize) {
-    for (let offset = 0; offset + 8 <= fileSize;) {
-        const header = await read(offset, Math.min(offset + 16, fileSize));
-        const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
-        let size = view.getUint32(0);
-        let headerSize = 8;
-        if (size === 1) {
-            // 64-bit size
-            if (header.length < 16) return null;
-            size = Number(view.getBigUint64(8));
-            headerSize = 16;
-        } else if (size === 0) {
-            // the box extends to the end of the file
-            size = fileSize - offset;
-        }
-        if (size < headerSize) return null;
-        if (String.fromCharCode(...header.subarray(4, 8)) === "mdat") {
-            const start = offset + headerSize;
-            const end = Math.min(offset + size, fileSize);
-            return mp3FrameStart(await read(start, Math.min(start + 4096, end))) === 0 ? {start, end} : null;
-        }
-        offset += size;
+    let moov = null;
+    for (let offset = 0; !moov && offset + 8 <= fileSize;) {
+        const box = mp4Box(await read(offset, Math.min(offset + 16, fileSize)), 0, fileSize - offset);
+        if (!box) return null;
+        if (box.type === "moov") moov = await read(offset, offset + box.end);
+        offset += box.end;
     }
-    return null;
+    if (!moov) return null;
+    try {
+        const view = new DataView(moov.buffer, moov.byteOffset, moov.byteLength);
+        const u32 = i => view.getUint32(i);
+        const root = mp4Box(moov, 0, moov.length);
+        const trak = mp4Boxes(moov, root.start, root.end)
+            .find(box => box.type === "trak" && mp4IsMp3(moov, mp4Find(moov, box, "mdia/minf/stbl/stsd")));
+        if (!trak) return null;
+        const table = type => mp4Find(moov, trak, `mdia/minf/stbl/${type}`);
+
+        const mdhd = mp4Find(moov, trak, "mdia/mdhd");
+        const timescale = u32(mdhd.start + (moov[mdhd.start] === 1 ? 20 : 12));
+        // the edit list skips the encoder delay; empty edits are ignored
+        let mediaTime = 0;
+        const elst = mp4Find(moov, trak, "edts/elst");
+        const v1 = elst && moov[elst.start] === 1;
+        for (let i = 0; elst && i < u32(elst.start + 4); i++) {
+            const entry = elst.start + 8 + i * (v1 ? 20 : 12);
+            const time = v1 ? Number(view.getBigInt64(entry + 8)) : view.getInt32(entry + 4);
+            if (time >= 0) {
+                mediaTime = time;
+                break;
+            }
+        }
+
+        const stsz = table("stsz");
+        const count = u32(stsz.start + 8);
+        const sizes = Array.from({length: count}, (_, i) => u32(stsz.start + 4) || u32(stsz.start + 12 + 4 * i));
+
+        const times = [];
+        const stts = table("stts");
+        for (let e = 0, time = -mediaTime; e < u32(stts.start + 4); e++) {
+            for (let i = 0; i < u32(stts.start + 8 + 8 * e); i++, time += u32(stts.start + 12 + 8 * e)) {
+                times.push(time / timescale);
+            }
+        }
+
+        const stco = table("stco");
+        const co64 = table("co64");
+        const chunkOffset = c => stco ? u32(stco.start + 8 + 4 * c) : Number(view.getBigUint64(co64.start + 8 + 8 * c));
+        const chunks = u32((stco ?? co64).start + 4);
+        const offsets = [];
+        const stsc = table("stsc");
+        for (let e = 0, entries = u32(stsc.start + 4); e < entries; e++) {
+            const entry = stsc.start + 8 + 12 * e;
+            const end = e + 1 < entries ? u32(entry + 12) - 1 : chunks;
+            for (let c = u32(entry) - 1; c < end; c++) {
+                for (let i = 0, offset = chunkOffset(c); i < u32(entry + 4) && offsets.length < count; i++) {
+                    offsets.push(offset);
+                    offset += sizes[offsets.length - 1];
+                }
+            }
+        }
+        const backToBack = offsets.every((offset, i) => i === 0 || offset === offsets[i - 1] + sizes[i - 1]);
+        return count > 0 && offsets.length === count && times.length === count && backToBack ? {offsets, sizes, times} : null;
+    } catch (error) {
+        // e.g. missing tables
+        console.error(error);
+        return null;
+    }
 }
 
-const MP3_BITRATES_KBPS = {
-    1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
-    2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
-};
-// by version bits: 0 MPEG 2.5, 2 MPEG 2, 3 MPEG 1
-const MP3_SAMPLE_RATES = {0: [11025, 12000, 8000], 2: [22050, 24000, 16000], 3: [44100, 48000, 32000]};
-
-// length in bytes of the MPEG layer III frame starting at i, or 0 if there is no valid frame header
-function mp3FrameLength(bytes, i) {
-    if (i + 4 > bytes.length || bytes[i] !== 0xFF || (bytes[i + 1] & 0xE0) !== 0xE0) return 0;
-    const version = (bytes[i + 1] >> 3) & 3;
-    const layer = (bytes[i + 1] >> 1) & 3;
-    const bitrateIndex = bytes[i + 2] >> 4;
-    const sampleRateIndex = (bytes[i + 2] >> 2) & 3;
-    if (version === 1 || layer !== 1 || bitrateIndex === 0 || bitrateIndex === 15 || sampleRateIndex === 3) return 0;
-    const bitrate = MP3_BITRATES_KBPS[version === 3 ? 1 : 2][bitrateIndex] * 1000;
-    const sampleRate = MP3_SAMPLE_RATES[version][sampleRateIndex];
-    const padding = (bytes[i + 2] >> 1) & 1;
-    return Math.floor((version === 3 ? 144 : 72) * bitrate / sampleRate) + padding;
+// {type, start, end} of the MP4 box at offset in bytes, start being where its content starts, or null if none fits
+function mp4Box(bytes, offset, end) {
+    if (offset + 8 > Math.min(end, bytes.length)) return null;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let size = view.getUint32(offset);
+    let start = offset + 8;
+    if (size === 1) {
+        if (offset + 16 > bytes.length) return null;
+        size = Number(view.getBigUint64(offset + 8));
+        start += 8;
+    } else if (size === 0) {
+        // the box extends to the end
+        size = end - offset;
+    }
+    if (offset + size < start || offset + size > end) return null;
+    return {type: String.fromCharCode(...bytes.subarray(offset + 4, offset + 8)), start, end: offset + size};
 }
 
-// offset of the first frame in a slice of an mp3, confirmed by the frame after it, or -1
-function mp3FrameStart(bytes) {
-    for (let i = 0; i + 4 <= bytes.length; i++) {
-        const length = mp3FrameLength(bytes, i);
-        if (length && mp3FrameLength(bytes, i + length)) return i;
-    }
-    return -1;
+function mp4Boxes(bytes, start, end) {
+    const boxes = [];
+    for (let box; (box = mp4Box(bytes, start, end)); start = box.end) boxes.push(box);
+    return boxes;
+}
+
+// the box at the path (e.g. "mdia/mdhd") below the given box, or undefined
+function mp4Find(bytes, box, path) {
+    for (const type of path.split("/")) box = box && mp4Boxes(bytes, box.start, box.end).find(child => child.type === type);
+    return box;
+}
+
+// whether a sample description (stsd) is MPEG audio, by the object type in its decoder config
+function mp4IsMp3(bytes, stsd) {
+    // the mp4a entry has 28 bytes before its esds box
+    const entry = stsd && mp4Box(bytes, stsd.start + 8, stsd.end);
+    const esds = entry && mp4Boxes(bytes, entry.start + 28, entry.end).find(box => box.type === "esds");
+    if (!esds) return false;
+    // the content of the descriptor at i (after its tag and variable length size)
+    const content = i => {
+        for (i++; bytes[i++] & 0x80;) ;
+        return i;
+    };
+    // the ES descriptor: ES id, flags for optional fields, then the decoder config descriptor
+    let i = content(esds.start + 4) + 2;
+    const flags = bytes[i++];
+    if (flags & 0x80) i += 2;
+    if (flags & 0x40) i += 1 + bytes[i];
+    if (flags & 0x20) i += 2;
+    const type = bytes[content(i)];
+    return bytes[i] === 4 && (type === 0x6B || type === 0x69);
 }
 
 // the microphone recording is decimated by this factor for the analysis
