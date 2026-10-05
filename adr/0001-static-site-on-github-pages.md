@@ -14,4 +14,4 @@ The radio is a reupload of newleafradio.glitch.me. It only needs to serve a few 
 ## Consequences
 - No server-side logic: everything (IPFS, sync, retries) runs in the browser.
 - Library builds must be loadable as UMD or classic scripts, also from a service worker (`importScripts`).
-- Everything in `docs/`, including these records, is published.
+- Everything in `docs/` is published; these records live in `adr/` so they are not.
