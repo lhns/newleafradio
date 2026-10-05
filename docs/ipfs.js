@@ -47,6 +47,18 @@ function loadVerifiedFetchScript() {
     return verifiedFetchScript;
 }
 
+// Providers are dialed via WebSockets or WebRTC, but workers have no WebRTC. Delegated routing sometimes returns
+// provider records without WebSocket addresses, and dialing such a peer fails, which fails the request with a 504.
+// Without stored addresses, libp2p looks the peer up instead, which returns all its addresses.
+function workerLibp2pConfig() {
+    if (typeof RTCPeerConnection !== "undefined") return undefined;
+    return {
+        peerStore: {
+            addressFilter: (peerId, multiaddr) => /\/wss?(\/|$)/.test(multiaddr.toString())
+        }
+    };
+}
+
 function getVerifiedFetch() {
     if (!verifiedFetchPromise) {
         // No recursive HTTP gateway: providers are found via delegated routing and fetched from directly.
@@ -54,7 +66,10 @@ function getVerifiedFetch() {
         // and other providers are only looked up after it fails, which can take a 60 s timeout.
         // Sessions (per root CID) expire after 60 s by default. The first request after that evicts the
         // session, which aborts everything it is still loading and makes that request fail with a 502.
-        const promise = loadVerifiedFetchScript().then(() => HeliaVerifiedFetch.createVerifiedFetch({gateways: []}, {
+        const promise = loadVerifiedFetchScript().then(() => HeliaVerifiedFetch.createVerifiedFetch({
+            gateways: [],
+            libp2pConfig: workerLibp2pConfig()
+        }, {
             sessionTTLms: 24 * 60 * 60 * 1000
         }));
         promise.catch(() => {
