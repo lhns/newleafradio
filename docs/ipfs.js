@@ -52,7 +52,11 @@ function getVerifiedFetch() {
         // No recursive HTTP gateway: providers are found via delegated routing and fetched from directly.
         // The default gateway (trustless-gateway.link) is used for every block once it served the first one,
         // and other providers are only looked up after it fails, which can take a 60 s timeout.
-        const promise = loadVerifiedFetchScript().then(() => HeliaVerifiedFetch.createVerifiedFetch({gateways: []}));
+        // Sessions (per root CID) expire after 60 s by default. The first request after that evicts the
+        // session, which aborts everything it is still loading and makes that request fail with a 502.
+        const promise = loadVerifiedFetchScript().then(() => HeliaVerifiedFetch.createVerifiedFetch({gateways: []}, {
+            sessionTTLms: 24 * 60 * 60 * 1000
+        }));
         promise.catch(() => {
             if (verifiedFetchPromise === promise) verifiedFetchPromise = null;
         });
