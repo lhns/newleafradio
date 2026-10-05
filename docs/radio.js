@@ -1,4 +1,4 @@
-const IPFS_CID = "bafybeihioe7qpue66ytxtvoysojww7k46ay4fwyug2qxoo52nqjuuljnnu";
+const IPFS_CID = "bafybeicl6y6ln2rj5izxjjbrypuewxcos3fv5aq2y2a3dsnbcuvvapi2k4";
 const FADE_STEP = 0.1;
 const FADE_INTERVAL_MS = 500;
 // the next song starts loading this long before the hour changes

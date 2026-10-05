@@ -10,7 +10,7 @@ The site will play tracks from the popular series Animal Crossing based on the t
 ## Changes from the original project
 
 - Added Animal Crossing Wild World Songs
-- Songs are now loaded from IPFS (CID: bafybeihioe7qpue66ytxtvoysojww7k46ay4fwyug2qxoo52nqjuuljnnu)
+- Songs are now loaded from IPFS (CID: bafybeicl6y6ln2rj5izxjjbrypuewxcos3fv5aq2y2a3dsnbcuvvapi2k4)
 - Playback is now synchronized to the current time
 - Site is now hosted on GitHub Pages
 
