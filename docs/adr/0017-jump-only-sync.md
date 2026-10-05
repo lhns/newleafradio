@@ -1,7 +1,7 @@
 # 0017. Correct the playback only by seeking
 
 - Status: Accepted, supersedes [0012](0012-converging-sync.md)
-- Date: 2026-10-05
+- Date: 2026-10-05 (PR #26)
 
 ## Context
 0012 made up small differences by playing 5 % faster or slower. On real devices the tempo and pitch changes are audible and sound bad. A short jump is preferred.
