@@ -9,6 +9,12 @@ const RETRY_DELAY_MS = 2000;
 const STALL_MS = 20 * 1000;
 // attempts per song to stream it via the service worker, before the whole song is downloaded instead
 const STREAMING_ATTEMPTS = 2;
+// playback errors in a row restart after 1 s, 2 s, 4 s ... up to this long, e.g. while the audio device keeps failing.
+// The backoff resets once no error occurred for ERROR_BACKOFF_RESET_MS
+const ERROR_BACKOFF_MAX_MS = 10 * 1000;
+const ERROR_BACKOFF_RESET_MS = 30 * 1000;
+let playbackErrors = 0;
+let lastPlaybackErrorAt = 0;
 
 let radioOn = false;
 let checkWeatherFlag = false;
@@ -273,8 +279,22 @@ async function promote(session, audio) {
     });
 
     // e.g. the stream broke or stalled after playback started
-    const restart = reason => {
+    let restarting = false;
+    const restart = async reason => {
         console.error("Error during playback. Restarting...", reason);
+        if (restarting) return;
+        restarting = true;
+        if (Date.now() - lastPlaybackErrorAt > ERROR_BACKOFF_RESET_MS) playbackErrors = 0;
+        lastPlaybackErrorAt = Date.now();
+        const delay = playbackErrors++ > 0 ? Math.min(1000 * 2 ** (playbackErrors - 2), ERROR_BACKOFF_MAX_MS) : 0;
+        if (delay) {
+            console.warn(`Repeated playback errors, restarting in ${delay / 1000} s`);
+            try {
+                await sleep(delay, session.signal);
+            } catch {
+                return;
+            }
+        }
         if (radioOn && currentSession === session && !pendingSession) {
             startSession(new Date(), {showProgress: false, fadeOutPrevious: false});
         }
