@@ -1,6 +1,6 @@
 # 0013. Manual sync button using the music itself
 
-- Status: Accepted
+- Status: Accepted, recording scheme superseded by [0018](0018-sync-in-slices.md)
 - Date: 2026-10-05 (PRs #10, #29)
 
 ## Context

@@ -1,4 +1,5 @@
-// Posts the samples of the first input channel to the main thread, in blocks of processorOptions.blockSize.
+// Posts the samples of the first input channel to the main thread, in blocks of processorOptions.blockSize,
+// with the audio context's frame after the block's last sample.
 // Silence is recorded while the input has no data, so the recording stays continuous.
 class RecorderProcessor extends AudioWorkletProcessor {
     constructor(options) {
@@ -15,7 +16,7 @@ class RecorderProcessor extends AudioWorkletProcessor {
             this.block[this.length++] = channel ? channel[i] : 0;
             if (this.length === this.blockSize) {
                 // the block's buffer is transferred, not copied
-                this.port.postMessage(this.block, [this.block.buffer]);
+                this.port.postMessage({samples: this.block, end: currentFrame + i + 1}, [this.block.buffer]);
                 this.block = new Float32Array(this.blockSize);
                 this.length = 0;
             }
