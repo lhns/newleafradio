@@ -42,6 +42,9 @@ const SYNC_MIN_SNR = 15;
 const SYNC_OWN_MIN_SNR = 18;
 // devices are heard while muted with at least this score (the muted slices are short, see SYNC_RECORDING_S)
 const SYNC_MUTED_MIN_SNR = 8;
+// and without this device also while it is unmuted (a device taken for this one at a wrong latency, its slices
+// inverted, is heard only in the slices taken for muted ones)
+const SYNC_UNMUTED_MIN_SNR = 5;
 // correlations are divided by the song part's energy, but at least this fraction of the average
 const SYNC_ENERGY_FLOOR = 0.05;
 const SYNC_OTHER_DEVICE_RATIO = 0.75;
@@ -51,6 +54,14 @@ const SYNC_DEVICES_SPREAD_S = 0.5;
 // a match of this device is at most this strong while muted, relative to unmuted. The other devices' matches are
 // heard in both, but their strength differs between them (the slices contain different music) by up to ~4 times.
 const SYNC_OWN_GONE_RATIO = 0.15;
+// this device's response (speaker, room, microphone) is fitted from this much before its direct sound to this much
+// after it, by least squares regularized by this fraction of the reference's power, in this many iterations
+const SYNC_RESPONSE_BEFORE_S = 0.005;
+const SYNC_RESPONSE_S = 0.05;
+const SYNC_RESPONSE_REGULARIZATION = 1e-3;
+const SYNC_RESPONSE_ITERATIONS = 40;
+// its loudness is fitted in blocks of this length (ducking)
+const SYNC_GAIN_BLOCK_S = 0.05;
 // samples the recorder collects before posting them to the main thread
 const SYNC_RECORDER_BLOCK = 2048;
 // matches of each kind in the summary that is logged after each measurement
@@ -475,13 +486,18 @@ function analyzeRecording({samples, toggles, position, reference, referenceStart
             ownGoneRatio: SYNC_OWN_GONE_RATIO, switchGuardS: SYNC_SWITCH_GUARD_S
         }
     });
-    const x = decimate(samples, factor);
+    const recording = decimate(samples, factor);
     // the microphone can be lowered while this device plays (ducking), so each slice is scaled to the same loudness
-    const switches = [0, ...toggles.map(i => Math.round(i / factor)), x.length];
-    for (let k = 0; k + 1 < switches.length; k++) {
-        const loudness = Math.max(rms(x, switches[k], switches[k + 1] - switches[k]), 1e-9);
-        for (let i = switches[k]; i < switches[k + 1]; i++) x[i] /= loudness;
-    }
+    const switches = [0, ...toggles.map(i => Math.round(i / factor)), recording.length];
+    const normalized = signal => {
+        const result = signal.slice();
+        for (let k = 0; k + 1 < switches.length; k++) {
+            const loudness = Math.max(rms(signal, switches[k], switches[k + 1] - switches[k]), 1e-9);
+            for (let i = switches[k]; i < switches[k + 1]; i++) result[i] /= loudness;
+        }
+        return result;
+    };
+    const x = normalized(recording);
     // only the part of the reference where devices are looked for (this device's position minus its latency, other
     // devices around it), relative to which expected is the position at the start of the recording
     const position0 = Math.round((position - referenceStart) * analysisRate);
@@ -493,18 +509,18 @@ function analyzeRecording({samples, toggles, position, reference, referenceStart
     const n = nextPowerOfTwo(s.length + x.length);
     const referenceSpectrum = spectrum(s, n);
     // scores of the recording's parts ([from, to) at the analysis rate) at each position in the reference
-    const correlateParts = parts => {
-        const signal = new Float64Array(x.length);
-        for (const [from, to] of parts) signal.set(x.subarray(from, to), from);
-        return zScores(normalizeByEnergy(correlate(signal, referenceSpectrum, n, analysisRate), s, x.length));
+    const correlateParts = (parts, signal = x) => {
+        const selected = new Float64Array(x.length);
+        for (const [from, to] of parts) selected.set(signal.subarray(from, to), from);
+        return zScores(normalizeByEnergy(correlate(selected, referenceSpectrum, n, analysisRate), s, x.length));
     };
     // the parts while this device is heard unmuted and muted, if switches are heard `latency` samples after they're made
     const guard = Math.round(SYNC_SWITCH_GUARD_S * analysisRate);
-    const slices = latency => {
+    const slices = (latency, skip = guard) => {
         const edges = [0, ...toggles.map(i => Math.round(i / factor) + latency), x.length];
         const parts = {unmuted: [], muted: []};
         for (let k = 0; k + 1 < edges.length; k++) {
-            const [from, to] = [Math.max(0, edges[k] + (k ? guard : 0)), Math.min(x.length, edges[k + 1])];
+            const [from, to] = [Math.max(0, edges[k] + (k ? skip : 0)), Math.min(x.length, edges[k + 1])];
             if (from < to) parts[k % 2 ? "muted" : "unmuted"].push([from, to]);
         }
         return parts;
@@ -518,7 +534,7 @@ function analyzeRecording({samples, toggles, position, reference, referenceStart
     const ownTo = Math.min(s.length - x.length, expected + Math.round(SYNC_OWN_AHEAD_S * analysisRate));
     if (ownFrom > ownTo) throw new SyncError("The song could not be loaded for syncing");
     const ms = peak => +((peak - expected) / analysisRate * 1000).toFixed(1);
-    const whole = correlateParts([[0, x.length]]);
+    let whole = correlateParts([[0, x.length]]);
     Object.assign(summary, {
         expected, expectedSeconds: position - referenceStart, referenceFirst: first,
         ownWindowMs: [ms(ownFrom), ms(ownTo)],
@@ -542,8 +558,10 @@ function analyzeRecording({samples, toggles, position, reference, referenceStart
             const device = nearby !== undefined && zM[nearby] >= SYNC_MUTED_MIN_SNR;
             return muted(peak) <= SYNC_OWN_GONE_RATIO * zU[peak] * (device && zU[nearby] > zM[nearby] ? zM[nearby] / zU[nearby] : 1);
         };
+        // not side lobes of a stronger match just outside the window
         const matches = findPeaks(zU, Math.max(ownFrom, candidate - reflections), Math.min(ownTo, candidate + reflections),
-            exclusion, SYNC_OWN_CANDIDATES).filter(peak => zU[peak] >= SYNC_OWN_MIN_SNR);
+            exclusion, SYNC_OWN_CANDIDATES).filter(peak => zU[peak] >= SYNC_OWN_MIN_SNR
+            && zU[peak] >= maxIn(zU, peak - sidelobes, peak + sidelobes));
         heard ||= matches.length > 0;
         const own = matches.find(gone);
         summary.ownCandidates.push({
@@ -571,16 +589,66 @@ function analyzeRecording({samples, toggles, position, reference, referenceStart
         throw new SyncError("Couldn't tell this device apart from the others, they may already be in sync");
     }
 
-    // other devices: heard in the whole recording, also while this device is muted
+    // this device is subtracted from the unmuted slices (it plays the reference), so it doesn't dilute the other
+    // devices' scores or match at repetitions of the music. Its response is fitted by least squares on the unmuted slices
+    // minus the response fitted on the muted slices: devices close to it are heard in both, so they cancel and stay.
+    // Fitted before the slices are scaled, the responses are the same in all slices of a kind; short ducking is followed
+    // by a gain fitted in blocks. All in the correlation's band, weighted towards high frequencies (music is mostly low
+    // ones).
+    const shaped = signal => {
+        const size = nextPowerOfTwo(signal.length + 2 * taps);
+        const {re, im} = spectrum(signal, size);
+        for (let bin = 0; bin < size; bin++) {
+            const frequency = Math.min(bin, size - bin) * analysisRate / size;
+            const weight = frequency < SYNC_BAND_HZ[0] || frequency > SYNC_BAND_HZ[1] ? 0 : frequency / SYNC_BAND_HZ[1];
+            re[bin] *= weight;
+            im[bin] *= weight;
+        }
+        fft(re, im, true);
+        return re.subarray(0, signal.length);
+    };
+    const own = directArrival(zU, best.own, reflections, sidelobes, gone);
+    const before = Math.round(SYNC_RESPONSE_BEFORE_S * analysisRate);
+    const taps = before + Math.round(SYNC_RESPONSE_S * analysisRate) + 1;
+    const shapedRecording = shaped(recording);
+    // the reference aligned with this device, so that aligned[i + k] is heard at sample i through the response's tap k
+    // (shaped with a margin, so that its ends don't matter)
+    const aligned = shaped(Float64Array.from({length: x.length + 3 * taps}, (_, k) => s[k + own + before - 2 * taps + 1] ?? 0))
+        .subarray(taps, x.length + 2 * taps);
+    const alignedSpectrum = spectrum(aligned, nextPowerOfTwo(aligned.length));
+    const unmutedResponse = fitResponse(shapedRecording, aligned, alignedSpectrum, parts.unmuted, taps);
+    const mutedResponse = fitResponse(shapedRecording, aligned, alignedSpectrum, parts.muted, taps);
+    // this device as heard unmuted, and what is subtracted
+    const unmutedHeard = crossCorrelate(unmutedResponse, alignedSpectrum);
+    const subtracted = crossCorrelate(unmutedResponse.map((value, k) => value - mutedResponse[k]), alignedSpectrum);
+    const residual = shapedRecording.slice();
+    const block = Math.round(SYNC_GAIN_BLOCK_S * analysisRate);
+    for (const [from, to] of slices(expected - best.candidate, 0).unmuted) {
+        for (let start = from; start < to; start += block) {
+            const end = Math.min(to, start + block);
+            let [dot, power] = [0, 1e-12];
+            for (let i = start; i < end; i++) {
+                dot += shapedRecording[i] * unmutedHeard[i];
+                power += unmutedHeard[i] ** 2;
+            }
+            for (let i = start; i < end; i++) residual[i] -= dot / power * subtracted[i];
+        }
+    }
+    const scaled = normalized(residual);
+    whole = correlateParts([[0, x.length]], scaled);
+    const unmutedResidual = correlateParts(parts.unmuted, scaled);
+    // what is left of this device, and the strongest matches without it
+    summary.residual = {own: +whole[own].toFixed(1), peaks: findPeaks(whole, 0, whole.length - 1, exclusion, SYNC_SUMMARY_PEAKS).map(describe)};
+
+    // other devices: heard in the whole recording without this device, also while it is muted, which rules out what is
+    // left of this device. A device in sync with it is left at its match, where it must be heard clearly while muted
+    // (this device can leak into the muted slices, see SYNC_OWN_GONE_RATIO).
     const radius = Math.round(SYNC_OTHER_SEARCH_S * analysisRate);
-    // without this device's match, which would hide matches close to it (its side lobes aren't heard while muted)
-    const withoutOwn = whole.slice();
-    withoutOwn.fill(-Infinity, best.own - 2, best.own + 3);
-    const peaks = findPeaks(withoutOwn, Math.max(0, best.own - radius), Math.min(whole.length - 1, best.own + radius), exclusion, SYNC_OTHER_CANDIDATES)
-        .filter(peak => muted(peak) >= SYNC_MUTED_MIN_SNR);
-    summary.otherPeaks = peaks.slice(0, SYNC_SUMMARY_PEAKS).map(describe);
-    // this device dilutes the scores of the whole recording
-    if (!peaks.length || Math.max(whole[peaks[0]], muted(peaks[0])) < SYNC_MIN_SNR) {
+    const peaks = findPeaks(whole, Math.max(0, own - radius), Math.min(whole.length - 1, own + radius), exclusion, SYNC_OTHER_CANDIDATES)
+        .filter(peak => muted(peak) >= (Math.abs(peak - own) > 2 ? SYNC_MUTED_MIN_SNR : SYNC_MIN_SNR)
+            && maxIn(unmutedResidual, peak - 2, peak + 2) >= SYNC_UNMUTED_MIN_SNR);
+    summary.otherPeaks = peaks.slice(0, SYNC_SUMMARY_PEAKS).map(peak => ({...describe(peak), unmutedResidual: +maxIn(unmutedResidual, peak - 2, peak + 2).toFixed(1)}));
+    if (!peaks.length || whole[peaks[0]] < SYNC_MIN_SNR) {
         throw new SyncError("No other device heard (or it is in sync with this one)");
     }
     const spread = Math.round(SYNC_DEVICES_SPREAD_S * analysisRate);
@@ -590,7 +658,6 @@ function analyzeRecording({samples, toggles, position, reference, referenceStart
     const others = peaks.filter(peak => whole[peak] >= SYNC_OTHER_DEVICE_RATIO * whole[peaks[0]]);
 
     // earlier arrivals must belong to the same device: gone while muted for this device, heard while muted for others
-    const own = directArrival(zU, best.own, reflections, sidelobes, gone);
     others[0] = directArrival(whole, others[0], reflections, sidelobes, peak => muted(peak) >= SYNC_MUTED_MIN_SNR);
     const ownPosition = own + parabolicOffset(zU, own);
     const offsetOf = peak => (peak + parabolicOffset(whole, peak) - ownPosition) / analysisRate;
@@ -650,6 +717,75 @@ function directArrival(values, peak, reflections, sidelobes, counts = () => true
         }
     }
     return direct;
+}
+
+// least-squares response g with x[i] ≈ sum of g[k] * aligned[i + k] over k < taps in the recording's parts
+function fitResponse(x, aligned, alignedSpectrum, parts, taps) {
+    // products of the regressors aligned[i + a] and aligned[i + b] (a, b < taps), and of them with the recording
+    const [masked, first] = [new Float64Array(x.length), new Float64Array(x.length)];
+    for (const [from, to] of parts) {
+        masked.set(x.subarray(from, to), from);
+        first.set(aligned.subarray(from, to), from);
+    }
+    const vector = crossCorrelate(masked, alignedSpectrum).slice(0, taps);
+    const matrix = new Float64Array(taps * taps);
+    matrix.set(crossCorrelate(first, alignedSpectrum).subarray(0, taps));
+    // the products of a and b sum to those of a - 1 and b - 1, shifted by one sample
+    for (let a = 1; a < taps; a++) {
+        matrix[a * taps] = matrix[a];
+        for (let b = a; b < taps; b++) {
+            let sum = matrix[(a - 1) * taps + b - 1];
+            for (const [from, to] of parts) sum += aligned[to + a - 1] * aligned[to + b - 1] - aligned[from + a - 1] * aligned[from + b - 1];
+            matrix[a * taps + b] = matrix[b * taps + a] = sum;
+        }
+    }
+    let trace = 0;
+    for (let a = 0; a < taps; a++) trace += matrix[a * taps + a];
+    for (let a = 0; a < taps; a++) matrix[a * taps + a] += SYNC_RESPONSE_REGULARIZATION * trace / taps + 1e-12;
+    return solveSymmetric(matrix, vector, taps);
+}
+
+// c[k] = sum of y[i] * signal[i + k] for the signal's spectrum (of a power of two size, without wrapping around)
+function crossCorrelate(y, {re: sRe, im: sIm}) {
+    const size = sRe.length;
+    const {re, im} = spectrum(y, size);
+    for (let bin = 0; bin < size; bin++) {
+        // conj(Y) * S
+        const product = re[bin] * sRe[bin] + im[bin] * sIm[bin];
+        im[bin] = re[bin] * sIm[bin] - im[bin] * sRe[bin];
+        re[bin] = product;
+    }
+    fft(re, im, true);
+    return re;
+}
+
+// solves the positive definite system matrix * result = vector (m x m, row-major) approximately, by conjugate gradients
+// (the strong components of the response converge first)
+function solveSymmetric(matrix, vector, m) {
+    const result = new Float64Array(m);
+    const residual = Float64Array.from(vector);
+    const direction = Float64Array.from(vector);
+    const product = new Float64Array(m);
+    let norm = residual.reduce((sum, value) => sum + value * value, 0);
+    for (let iteration = 0; iteration < SYNC_RESPONSE_ITERATIONS && norm > 0; iteration++) {
+        let curvature = 0;
+        for (let i = 0; i < m; i++) {
+            let sum = 0;
+            for (let j = 0, row = i * m; j < m; j++) sum += matrix[row + j] * direction[j];
+            product[i] = sum;
+            curvature += direction[i] * sum;
+        }
+        const step = norm / curvature;
+        let next = 0;
+        for (let i = 0; i < m; i++) {
+            result[i] += step * direction[i];
+            residual[i] -= step * product[i];
+            next += residual[i] * residual[i];
+        }
+        for (let i = 0; i < m; i++) direction[i] = residual[i] + next / norm * direction[i];
+        norm = next;
+    }
+    return result;
 }
 
 function rms(signal, from, length) {

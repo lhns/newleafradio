@@ -14,12 +14,13 @@
 
 ## Consequences
 - ~4 s of choppy playback instead of 2 s of silence.
-- Simulations (rooms, noises and songs as in 0014, switches heard with ±20 ms jitter; "with ducking": the microphone 8 dB lower with −30 dB bursts while this device plays), old → new, wrong by 20 ms or more / false device / OK:
-  - the other device as loud or louder, 0–300 ms or 2.4–4.5 s apart, this device sometimes absent (1935 cases): 116 → 6 / 39 → 1 / 550 → 488; with ducking 28 → 3 / 6 → 1 / 500 → 497.
-  - the other device quieter (−6 to −20 dB), 0 ms to 3 s apart (1215 cases): 8 → 13 / 0 → 2 / 819 → 479; with ducking 9 → 19 / 0 → 0 / 759 → 455.
+- Simulations (rooms, noises and songs as in 0014, switches heard with ±20 ms jitter; "with ducking": the microphone 8 dB lower with −30 dB bursts while this device plays), old → slices (PR #31) → slices with this device subtracted (PR #32, 0014), wrong by 20 ms or more / false device / OK:
+  - the other device as loud or louder, 0–300 ms or 2.4–4.5 s apart, this device sometimes absent (1935 cases): 116 → 6 → 3 / 39 → 1 → 0 / 550 → 488 → 548; with ducking 28 → 3 → 1 / 6 → 1 → 1 / 500 → 497 → 518.
+  - the other device quieter (−6 to −20 dB), 0 ms to 3 s apart (1215 cases): 8 → 13 → 5 / 0 → 2 → 0 / 819 → 479 → 596; with ducking 9 → 19 → 10 / 0 → 0 → 0 / 759 → 455 → 516.
+  - of these, this device absent (360 cases): with the slices all rejected except one with ducking (a reflection of the other device taken for this one), also with this device subtracted.
 - Devices in sync (within the width of a match, ~1–2 ms) can't be told apart: rejected with "they may already be in sync" or "No other device heard (or it is in sync with this one)".
-- A quieter other device is rejected more often: the muted slices are shorter (~1.5 s in pieces instead of 2 s) and this device dilutes the scores of the whole recording.
-- Up to 8 correlations per measurement instead of 2 (~1 s in a worker, the reference is cropped to the search range).
+- A quieter other device is still rejected more often than with the old layout: the old layout confirmed devices in sync (94 of 130 without ducking), the slices can't (see 0014), and this device isn't heard in 125 of the 1215 cases (its score below 18 in the unmuted slices).
+- Up to 10 correlations per measurement instead of 2, and fitting this device's response (~3 s in Node, ~1 s of it the subtraction; the reference is cropped to the search range).
 - Rapid `muted` toggling might glitch some audio outputs; untested on real devices.
 
 ## Rejected
