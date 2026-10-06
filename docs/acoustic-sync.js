@@ -1,6 +1,7 @@
 // Measures how far other devices playing the same song are ahead of this device, by listening to them.
 // The microphone hears this device and the other devices. Both are located in a decoded slice of the song by
-// cross-correlation, and this device is told apart by muting it for the last part of the recording.
+// cross-correlation. This device is muted and unmuted in short slices while recording: it is the match that is gone
+// while muted, the other devices are heard throughout.
 // Microphone and output latency cancel out, because all devices are heard through the same microphone.
 // The analysis runs in a worker loading this file, so it doesn't block the page.
 // Uses onAbort from radio.js.
@@ -9,10 +10,12 @@
 const SYNC_MIC_TIMEOUT_S = 3;
 // time after the microphone delivers sound before recording (output glitches when the microphone opens)
 const SYNC_SETTLE_S = 0.5;
-const SYNC_UNMUTED_S = 2;
-// time for muting to reach the speaker (output latency, e.g. bluetooth)
-const SYNC_GUARD_S = 0.5;
-const SYNC_MUTED_S = 2;
+// this device is muted and unmuted every SYNC_SLICE_S while recording, an odd number of slices ends unmuted
+const SYNC_RECORDING_S = 4.5;
+const SYNC_SLICE_S = 0.5;
+// time after each switch that isn't analyzed: a switch is heard after this device's latency, which is estimated from
+// its match, with some jitter, and reverberates
+const SYNC_SWITCH_GUARD_S = 0.15;
 // the reference covers this much of the song around the current position
 const SYNC_REFERENCE_MARGIN_S = 10;
 const SYNC_MAX_WHOLE_FILE_BYTES = 30 * 1024 * 1024;
@@ -22,7 +25,8 @@ const SYNC_PHAT_BETA = 0.7;
 // this device is searched from this much before its playback position (latency) to this much after
 const SYNC_OWN_LATENCY_S = 0.7;
 const SYNC_OWN_AHEAD_S = 0.05;
-const SYNC_OWN_CANDIDATES = 8;
+// this device's latency is looked for at this many matches in its window
+const SYNC_OWN_CANDIDATES = 3;
 // other devices are searched this close to this device (system clocks can differ by seconds)
 const SYNC_OTHER_SEARCH_S = 5;
 const SYNC_OTHER_CANDIDATES = 5;
@@ -36,20 +40,28 @@ const SYNC_SIDELOBE_S = 0.0025;
 // noise and similar parts of the song score up to ~14; this device is close to the microphone
 const SYNC_MIN_SNR = 15;
 const SYNC_OWN_MIN_SNR = 18;
+// devices are heard while muted with at least this score (the muted slices are short, see SYNC_RECORDING_S)
+const SYNC_MUTED_MIN_SNR = 8;
+// and without this device also while it is unmuted (a device taken for this one at a wrong latency, its slices
+// inverted, is heard only in the slices taken for muted ones)
+const SYNC_UNMUTED_MIN_SNR = 5;
 // correlations are divided by the song part's energy, but at least this fraction of the average
 const SYNC_ENERGY_FLOOR = 0.05;
 const SYNC_OTHER_DEVICE_RATIO = 0.75;
 // a second match this strong and further away is ambiguous (repeating music), so the result is rejected
 const SYNC_AMBIGUOUS_RATIO = 0.8;
 const SYNC_DEVICES_SPREAD_S = 0.5;
-// a match counts as heard while muted if it is at least this strong relative to the strongest match of each part
-const SYNC_HEARD_WHILE_MUTED_RATIO = 0.5;
-// stricter for weaker matches of this device, which must be gone while muted
-const SYNC_OWN_GONE_WHILE_MUTED_RATIO = 0.25;
-// this device is looked for among weaker matches only down to this fraction of the strongest
-const SYNC_OWN_MIN_RELATIVE = 0.4;
-// a match of this device in sync with another device makes the song this much louder while unmuted
-const SYNC_OWN_GAIN_RATIO = 1.3;
+// a match of this device is at most this strong while muted, relative to unmuted. The other devices' matches are
+// heard in both, but their strength differs between them (the slices contain different music) by up to ~4 times.
+const SYNC_OWN_GONE_RATIO = 0.15;
+// this device's response (speaker, room, microphone) is fitted from this much before its direct sound to this much
+// after it, by least squares regularized by this fraction of the reference's power, in this many iterations
+const SYNC_RESPONSE_BEFORE_S = 0.005;
+const SYNC_RESPONSE_S = 0.05;
+const SYNC_RESPONSE_REGULARIZATION = 1e-3;
+const SYNC_RESPONSE_ITERATIONS = 40;
+// its loudness is fitted in blocks of this length (ducking)
+const SYNC_GAIN_BLOCK_S = 0.05;
 // samples the recorder collects before posting them to the main thread
 const SYNC_RECORDER_BLOCK = 2048;
 // matches of each kind in the summary that is logged after each measurement
@@ -116,7 +128,7 @@ async function measureSongOffset({src, getPosition, setMuted, signal}) {
     let stream = null;
     try {
         const factor = analysisFactor(context.sampleRate);
-        const recordingSeconds = SYNC_MIC_TIMEOUT_S + SYNC_SETTLE_S + SYNC_UNMUTED_S + SYNC_GUARD_S + SYNC_MUTED_S;
+        const recordingSeconds = SYNC_MIC_TIMEOUT_S + SYNC_SETTLE_S + SYNC_RECORDING_S;
         const reference = loadReference(src, getPosition(), recordingSeconds, context.sampleRate / factor, signal);
         reference.catch(() => {
         });
@@ -136,21 +148,24 @@ async function measureSongOffset({src, getPosition, setMuted, signal}) {
         await context.resume();
         await recorderLoaded;
 
-        const {samples, timing, ...recording} = await record(context, stream, getPosition, setMuted, signal);
+        const {recording, start, toggles, timing} = await record(context, stream, getPosition, setMuted, signal);
         const {deviceId, groupId, ...settings} = stream.getAudioTracks()[0]?.getSettings() ?? {};
         stream.getTracks().forEach(track => track.stop());
         stream = null;
 
         const {samples: referenceSamples, startSeconds} = await reference;
-        const input = {...recording, reference: referenceSamples, referenceStart: startSeconds, rate: context.sampleRate};
+        const input = {
+            samples: recording.subarray(start), toggles, position: timing.position,
+            reference: referenceSamples, referenceStart: startSeconds, rate: context.sampleRate
+        };
         const report = (outcome, summary) => {
             summary = {
-                ...outcome, ...summary, ...timing, settings,
+                ...outcome, ...summary, ...timing, start, settings,
                 outputLatency: context.outputLatency, baseLatency: context.baseLatency
             };
             console.debug("sync analysis", summary);
             try {
-                if (SYNC_DEBUG) downloadSyncDebug(samples, input, summary);
+                if (SYNC_DEBUG) downloadSyncDebug(recording, input, summary);
             } catch (error) {
                 console.error(error);
             }
@@ -179,14 +194,17 @@ async function record(context, stream, getPosition, setMuted, signal) {
     let length = 0;
     // the first sample with sound: until the microphone runs, the recorder records exact zeros
     let micStart = -1;
+    // the audio context's frame of the first sample
+    let firstFrame = 0;
     let onSamples = null;
-    recorder.port.onmessage = ({data}) => {
+    recorder.port.onmessage = ({data: {samples, end}}) => {
+        if (!length) firstFrame = end - samples.length;
         if (micStart < 0) {
-            const i = data.findIndex(sample => sample !== 0);
+            const i = samples.findIndex(sample => sample !== 0);
             if (i >= 0) micStart = length + i;
         }
-        chunks.push(data);
-        length += data.length;
+        chunks.push(samples);
+        length += samples.length;
         onSamples?.();
     };
     // resolves once done() returns true, which is checked whenever samples arrive
@@ -213,37 +231,37 @@ async function record(context, stream, getPosition, setMuted, signal) {
         const timeout = Math.round(SYNC_MIC_TIMEOUT_S * rate);
         await waitFor(() => micStart >= 0 || length >= timeout);
         if (micStart < 0) throw new SyncError("The microphone didn't deliver any sound");
-        const unmutedStart = micStart + Math.round(SYNC_SETTLE_S * rate);
-        const unmutedEnd = unmutedStart + Math.round(SYNC_UNMUTED_S * rate);
+        const start = micStart + Math.round(SYNC_SETTLE_S * rate);
+        const end = start + Math.round(SYNC_RECORDING_S * rate);
+        // the sample being recorded now, from the audio clock: the main thread can lag behind the recorder
+        const now = () => Math.round(context.currentTime * rate) - firstFrame;
         // the song position when sample i was recorded
-        const positionAt = i => getPosition() - (length - i) / rate;
-        await waitForSamples(unmutedStart);
-        const position = positionAt(unmutedStart);
-        await waitForSamples(unmutedEnd);
-        setMuted(true);
-        const mutedStart = length + Math.round(SYNC_GUARD_S * rate);
-        const mutedEnd = mutedStart + Math.round(SYNC_MUTED_S * rate);
-        await waitForSamples(mutedEnd);
-        setMuted(false);
-        const endPosition = positionAt(mutedEnd);
+        const positionAt = i => getPosition() - (now() - i) / rate;
+        await waitForSamples(start);
+        const position = positionAt(start);
+        // the samples (from start) at which this device was muted and unmuted
+        const toggles = [];
+        for (let k = 1; k < Math.round(SYNC_RECORDING_S / SYNC_SLICE_S); k++) {
+            await waitForSamples(start + Math.round(k * SYNC_SLICE_S * rate));
+            setMuted(k % 2 === 1);
+            toggles.push(now() - start);
+        }
+        await waitForSamples(end);
+        const endPosition = positionAt(end);
 
-        const samples = new Float32Array(mutedEnd);
+        const recording = new Float32Array(end);
         let offset = 0;
         for (const chunk of chunks) {
-            if (offset >= mutedEnd) break;
-            samples.set(chunk.subarray(0, mutedEnd - offset), offset);
+            if (offset >= end) break;
+            recording.set(chunk.subarray(0, end - offset), offset);
             offset += chunk.length;
         }
         return {
-            unmuted: samples.subarray(unmutedStart, unmutedEnd),
-            muted: samples.subarray(mutedStart, mutedEnd),
-            mutedDelay: mutedStart - unmutedStart,
-            position,
-            samples,
+            recording, start, toggles,
             // the song should advance as much as the recording, otherwise the playback rate changed or it was seeked
             timing: {
-                micStart, unmutedStart, mutedStart, endPosition,
-                driftMs: +((endPosition - position - (mutedEnd - unmutedStart) / rate) * 1000).toFixed(1)
+                micStart, position, endPosition,
+                driftMs: +((endPosition - position - (end - start) / rate) * 1000).toFixed(1)
             }
         };
     } finally {
@@ -452,99 +470,199 @@ function analysisFactor(rate) {
     return Math.max(1, Math.round(rate / SYNC_ANALYSIS_RATE));
 }
 
-// Finds this device (heard only in the unmuted part) and the other devices (heard in both parts) in the reference.
-// unmuted and muted are recorded at rate, the reference at rate / analysisFactor(rate).
-// mutedDelay is the number of samples from the start of the unmuted to the start of the muted part,
-// position the song position at the start of the unmuted part and referenceStart the one of the reference.
-// summary is filled with details for diagnostics, also when an error is thrown.
-function analyzeRecording({unmuted, muted, mutedDelay, position, reference, referenceStart, rate}, summary = {}) {
+// Finds this device (heard only while unmuted) and the other devices (heard while muted) in the reference.
+// samples is the recording at rate, toggles are the samples at which this device was muted, unmuted, muted...,
+// position is the song position at the first sample. The reference is at rate / analysisFactor(rate), referenceStart
+// is its song position. summary is filled with details for diagnostics, also when an error is thrown.
+function analyzeRecording({samples, toggles, position, reference, referenceStart, rate}, summary = {}) {
     const factor = analysisFactor(rate);
     const analysisRate = rate / factor;
     const dbfs = signal => +(20 * Math.log10(Math.max(rms(signal, 0, signal.length), 1e-9))).toFixed(1);
     Object.assign(summary, {
-        rate, analysisRate, position, referenceStart, mutedDelay,
-        unmutedLength: unmuted.length, mutedLength: muted.length, referenceLength: reference.length,
-        unmutedDbfs: dbfs(unmuted), mutedDbfs: dbfs(muted), referenceDbfs: dbfs(reference),
+        rate, analysisRate, position, referenceStart, toggles, length: samples.length, referenceLength: reference.length,
+        dbfs: dbfs(samples), referenceDbfs: dbfs(reference),
         thresholds: {
             ownMinSnr: SYNC_OWN_MIN_SNR, minSnr: SYNC_MIN_SNR, ownLatencyS: SYNC_OWN_LATENCY_S, ownAheadS: SYNC_OWN_AHEAD_S,
-            ownGoneWhileMuted: SYNC_OWN_GONE_WHILE_MUTED_RATIO, heardWhileMuted: SYNC_HEARD_WHILE_MUTED_RATIO
+            ownGoneRatio: SYNC_OWN_GONE_RATIO, switchGuardS: SYNC_SWITCH_GUARD_S
         }
     });
-    const u = decimate(unmuted, factor);
-    const m = decimate(muted, factor);
-    const s = reference;
-    const shift = Math.round(mutedDelay / factor);
-    if (s.length < Math.max(u.length, m.length) + 2) throw new SyncError("The song could not be loaded for syncing");
+    const recording = decimate(samples, factor);
+    // the microphone can be lowered while this device plays (ducking), so each slice is scaled to the same loudness
+    const switches = [0, ...toggles.map(i => Math.round(i / factor)), recording.length];
+    const normalized = signal => {
+        const result = signal.slice();
+        for (let k = 0; k + 1 < switches.length; k++) {
+            const loudness = Math.max(rms(signal, switches[k], switches[k + 1] - switches[k]), 1e-9);
+            for (let i = switches[k]; i < switches[k + 1]; i++) result[i] /= loudness;
+        }
+        return result;
+    };
+    const x = normalized(recording);
+    // only the part of the reference where devices are looked for (this device's position minus its latency, other
+    // devices around it), relative to which expected is the position at the start of the recording
+    const position0 = Math.round((position - referenceStart) * analysisRate);
+    const first = Math.max(0, position0 - Math.round((SYNC_OWN_LATENCY_S + SYNC_OTHER_SEARCH_S) * analysisRate));
+    const s = reference.subarray(first, position0 + Math.round((SYNC_OWN_AHEAD_S + SYNC_OTHER_SEARCH_S) * analysisRate) + x.length);
+    const expected = position0 - first;
+    if (s.length < x.length + 2) throw new SyncError("The song could not be loaded for syncing");
 
-    const n = nextPowerOfTwo(s.length + Math.max(u.length, m.length));
+    const n = nextPowerOfTwo(s.length + x.length);
     const referenceSpectrum = spectrum(s, n);
-    const zU = zScores(normalizeByEnergy(correlate(u, referenceSpectrum, n, analysisRate), s, u.length));
-    const zM = zScores(normalizeByEnergy(correlate(m, referenceSpectrum, n, analysisRate), s, m.length));
+    // scores of the recording's parts ([from, to) at the analysis rate) at each position in the reference
+    const correlateParts = (parts, signal = x) => {
+        const selected = new Float64Array(x.length);
+        for (const [from, to] of parts) selected.set(signal.subarray(from, to), from);
+        return zScores(normalizeByEnergy(correlate(selected, referenceSpectrum, n, analysisRate), s, x.length));
+    };
+    // the parts while this device is heard unmuted and muted, if switches are heard `latency` samples after they're made
+    const guard = Math.round(SYNC_SWITCH_GUARD_S * analysisRate);
+    const slices = (latency, skip = guard) => {
+        const edges = [0, ...toggles.map(i => Math.round(i / factor) + latency), x.length];
+        const parts = {unmuted: [], muted: []};
+        for (let k = 0; k + 1 < edges.length; k++) {
+            const [from, to] = [Math.max(0, edges[k] + (k ? skip : 0)), Math.min(x.length, edges[k + 1])];
+            if (from < to) parts[k % 2 ? "muted" : "unmuted"].push([from, to]);
+        }
+        return parts;
+    };
     const exclusion = Math.round(SYNC_PEAK_EXCLUSION_S * analysisRate);
     const reflections = Math.round(SYNC_REFLECTION_S * analysisRate);
+    const sidelobes = Math.round(SYNC_SIDELOBE_S * analysisRate);
 
     // this device: matches shortly before the expected position (playback position minus latency)
-    const expected = Math.round((position - referenceStart) * analysisRate);
     const ownFrom = Math.max(0, expected - Math.round(SYNC_OWN_LATENCY_S * analysisRate));
-    const ownTo = Math.min(zU.length - 1, expected + Math.round(SYNC_OWN_AHEAD_S * analysisRate));
-    // a match's offset from the expected position in ms and its scores in the unmuted and the muted part
-    const describe = peak => ({
-        ms: +((peak - expected) / analysisRate * 1000).toFixed(1),
-        unmuted: +(zU[peak] ?? NaN).toFixed(1),
-        muted: +maxIn(zM, peak + shift - 2, peak + shift + 2).toFixed(1)
-    });
-    const otherRadius = Math.round(SYNC_OTHER_SEARCH_S * analysisRate);
-    Object.assign(summary, {
-        expected, expectedSeconds: position - referenceStart,
-        ownWindowMs: [(ownFrom - expected) / analysisRate * 1000, (ownTo - expected) / analysisRate * 1000],
-        ownCandidates: findPeaks(zU, ownFrom, ownTo, exclusion, SYNC_SUMMARY_PEAKS).map(describe),
-        // anywhere in the unmuted part, in case this device's latency is outside the window
-        unmutedPeaks: findPeaks(zU, 0, zU.length - 1, exclusion, SYNC_SUMMARY_PEAKS).map(describe),
-        otherPeaks: findPeaks(zM, Math.max(0, expected + shift - otherRadius), Math.min(zM.length - 1, expected + shift + otherRadius),
-            exclusion, SYNC_SUMMARY_PEAKS).map(peak => describe(peak - shift))
-    });
+    const ownTo = Math.min(s.length - x.length, expected + Math.round(SYNC_OWN_AHEAD_S * analysisRate));
     if (ownFrom > ownTo) throw new SyncError("The song could not be loaded for syncing");
-    const candidates = findPeaks(zU, ownFrom, ownTo, exclusion, SYNC_OWN_CANDIDATES);
-    if (!candidates.length || zU[candidates[0]] < SYNC_OWN_MIN_SNR) {
-        throw new SyncError("Couldn't hear the song, turn the volume up");
-    }
-    const strongest = candidates[0];
-    // a match is heard while muted if the muted part has a comparably strong match at the same position,
-    // relative to the strongest match of each part, because the two parts' scores aren't comparable directly
-    const mutedMax = Math.max(maxIn(zM, ownFrom + shift, ownTo + shift), 1e-9);
-    const heardWhileMuted = (peak, ratio) => peak + shift < zM.length
-        && maxIn(zM, peak + shift - 2, peak + shift + 2) / mutedMax >= ratio * zU[peak] / zU[strongest];
-    // how much louder the song is while unmuted, relative to the reference at the matched positions
-    const gain = (signal, at) => rms(signal, 0, signal.length) / Math.max(rms(s, at, signal.length), 1e-9);
+    const ms = peak => +((peak - expected) / analysisRate * 1000).toFixed(1);
+    let whole = correlateParts([[0, x.length]]);
+    Object.assign(summary, {
+        expected, expectedSeconds: position - referenceStart, referenceFirst: first,
+        ownWindowMs: [ms(ownFrom), ms(ownTo)],
+        // anywhere, in case this device's latency is outside the window
+        peaks: findPeaks(whole, 0, whole.length - 1, exclusion, SYNC_SUMMARY_PEAKS).map(peak => ({ms: ms(peak), score: +whole[peak].toFixed(1)})),
+        ownCandidates: []
+    });
 
-    // this device is the strongest match that is gone while muted (outside the strongest one's reflections),
-    // otherwise the strongest match if the song is louder while unmuted (in sync with another device)
-    let own = candidates.find(peak => zU[peak] >= SYNC_OWN_MIN_SNR && zU[peak] >= SYNC_OWN_MIN_RELATIVE * zU[strongest]
-        && (peak === strongest || Math.abs(peak - strongest) > reflections)
-        && !heardWhileMuted(peak, peak === strongest ? SYNC_HEARD_WHILE_MUTED_RATIO : SYNC_OWN_GONE_WHILE_MUTED_RATIO));
-    if (own === undefined && gain(u, strongest) >= SYNC_OWN_GAIN_RATIO * gain(m, strongest + shift)) {
-        own = strongest;
+    // this device's latency (and so when the switches are heard) is tried for the strongest matches in its window:
+    // this device is the strongest match near one of them that is gone while muted
+    let best = null;
+    let heard = false;
+    for (const candidate of findPeaks(whole, ownFrom, ownTo, reflections, SYNC_OWN_CANDIDATES)) {
+        const parts = slices(expected - candidate);
+        const zU = correlateParts(parts.unmuted);
+        const zM = correlateParts(parts.muted);
+        const muted = peak => maxIn(zM, peak - 2, peak + 2);
+        const gone = peak => {
+            // a match close to a device heard while muted could be its reflection, which is scaled like its match
+            const [nearby] = findPeaks(zM, peak - reflections, peak + reflections, exclusion, 1);
+            const device = nearby !== undefined && zM[nearby] >= SYNC_MUTED_MIN_SNR;
+            return muted(peak) <= SYNC_OWN_GONE_RATIO * zU[peak] * (device && zU[nearby] > zM[nearby] ? zM[nearby] / zU[nearby] : 1);
+        };
+        // not side lobes of a stronger match just outside the window
+        const matches = findPeaks(zU, Math.max(ownFrom, candidate - reflections), Math.min(ownTo, candidate + reflections),
+            exclusion, SYNC_OWN_CANDIDATES).filter(peak => zU[peak] >= SYNC_OWN_MIN_SNR
+            && zU[peak] >= maxIn(zU, peak - sidelobes, peak + sidelobes));
+        heard ||= matches.length > 0;
+        const own = matches.find(gone);
+        summary.ownCandidates.push({
+            ms: ms(candidate), score: +whole[candidate].toFixed(1),
+            matches: matches.map(peak => ({ms: ms(peak), unmuted: +zU[peak].toFixed(1), muted: +muted(peak).toFixed(1)}))
+        });
+        if (own !== undefined && (!best || zU[own] > best.zU[best.own])) best = {own, zU, zM, muted, gone, parts, candidate};
     }
-    if (own === undefined) throw new SyncError("Couldn't hear this device's own speaker, turn the volume up");
+    if (!best) {
+        throw new SyncError(heard ? "Couldn't tell this device apart from the others, they may already be in sync"
+            : "Couldn't hear the song, turn the volume up");
+    }
+    const {zU, zM, muted, gone, parts} = best;
+    const describe = peak => ({
+        ms: ms(peak), score: +whole[peak].toFixed(1), unmuted: +zU[peak].toFixed(1), muted: +muted(peak).toFixed(1)
+    });
+    // the slices that were analyzed, in samples of the recording
+    summary.slices = Object.fromEntries(Object.entries(parts).map(([key, list]) => [key, list.map(part => part.map(i => i * factor))]));
+    summary.latencyMs = +((expected - best.candidate) / analysisRate * 1000).toFixed(1);
+    summary.own = describe(best.own);
+    // a stronger match in the window that is heard while muted but stronger unmuted is this device in sync with another
+    // one, and the match gone while muted only its repetition (repeating music)
+    if (findPeaks(zU, ownFrom, ownTo, exclusion, SYNC_OWN_CANDIDATES).some(peak => Math.abs(peak - best.own) > reflections
+        && zU[peak] > zU[best.own] && zU[peak] > muted(peak) && !gone(peak))) {
+        throw new SyncError("Couldn't tell this device apart from the others, they may already be in sync");
+    }
 
-    // other devices: heard while this device is muted
+    // this device is subtracted from the unmuted slices (it plays the reference), so it doesn't dilute the other
+    // devices' scores or match at repetitions of the music. Its response is fitted by least squares on the unmuted slices
+    // minus the response fitted on the muted slices: devices close to it are heard in both, so they cancel and stay.
+    // Fitted before the slices are scaled, the responses are the same in all slices of a kind; short ducking is followed
+    // by a gain fitted in blocks. All in the correlation's band, weighted towards high frequencies (music is mostly low
+    // ones).
+    const shaped = signal => {
+        const size = nextPowerOfTwo(signal.length + 2 * taps);
+        const {re, im} = spectrum(signal, size);
+        for (let bin = 0; bin < size; bin++) {
+            const frequency = Math.min(bin, size - bin) * analysisRate / size;
+            const weight = frequency < SYNC_BAND_HZ[0] || frequency > SYNC_BAND_HZ[1] ? 0 : frequency / SYNC_BAND_HZ[1];
+            re[bin] *= weight;
+            im[bin] *= weight;
+        }
+        fft(re, im, true);
+        return re.subarray(0, signal.length);
+    };
+    const own = directArrival(zU, best.own, reflections, sidelobes, gone);
+    const before = Math.round(SYNC_RESPONSE_BEFORE_S * analysisRate);
+    const taps = before + Math.round(SYNC_RESPONSE_S * analysisRate) + 1;
+    const shapedRecording = shaped(recording);
+    // the reference aligned with this device, so that aligned[i + k] is heard at sample i through the response's tap k
+    // (shaped with a margin, so that its ends don't matter)
+    const aligned = shaped(Float64Array.from({length: x.length + 3 * taps}, (_, k) => s[k + own + before - 2 * taps + 1] ?? 0))
+        .subarray(taps, x.length + 2 * taps);
+    const alignedSpectrum = spectrum(aligned, nextPowerOfTwo(aligned.length));
+    const unmutedResponse = fitResponse(shapedRecording, aligned, alignedSpectrum, parts.unmuted, taps);
+    const mutedResponse = fitResponse(shapedRecording, aligned, alignedSpectrum, parts.muted, taps);
+    // this device as heard unmuted, and what is subtracted
+    const unmutedHeard = crossCorrelate(unmutedResponse, alignedSpectrum);
+    const subtracted = crossCorrelate(unmutedResponse.map((value, k) => value - mutedResponse[k]), alignedSpectrum);
+    const residual = shapedRecording.slice();
+    const block = Math.round(SYNC_GAIN_BLOCK_S * analysisRate);
+    for (const [from, to] of slices(expected - best.candidate, 0).unmuted) {
+        for (let start = from; start < to; start += block) {
+            const end = Math.min(to, start + block);
+            let [dot, power] = [0, 1e-12];
+            for (let i = start; i < end; i++) {
+                dot += shapedRecording[i] * unmutedHeard[i];
+                power += unmutedHeard[i] ** 2;
+            }
+            for (let i = start; i < end; i++) residual[i] -= dot / power * subtracted[i];
+        }
+    }
+    const scaled = normalized(residual);
+    whole = correlateParts([[0, x.length]], scaled);
+    const unmutedResidual = correlateParts(parts.unmuted, scaled);
+    // what is left of this device, and the strongest matches without it
+    summary.residual = {own: +whole[own].toFixed(1), peaks: findPeaks(whole, 0, whole.length - 1, exclusion, SYNC_SUMMARY_PEAKS).map(describe)};
+
+    // other devices: heard in the whole recording without this device, also while it is muted, which rules out what is
+    // left of this device. A device in sync with it is left at its match, where it must be heard clearly while muted
+    // (this device can leak into the muted slices, see SYNC_OWN_GONE_RATIO).
     const radius = Math.round(SYNC_OTHER_SEARCH_S * analysisRate);
-    const peaks = findPeaks(zM, Math.max(0, own + shift - radius), Math.min(zM.length - 1, own + shift + radius),
-        exclusion, SYNC_OTHER_CANDIDATES);
-    if (!peaks.length || zM[peaks[0]] < SYNC_MIN_SNR) throw new SyncError("No other device heard");
+    const peaks = findPeaks(whole, Math.max(0, own - radius), Math.min(whole.length - 1, own + radius), exclusion, SYNC_OTHER_CANDIDATES)
+        .filter(peak => muted(peak) >= (Math.abs(peak - own) > 2 ? SYNC_MUTED_MIN_SNR : SYNC_MIN_SNR)
+            && maxIn(unmutedResidual, peak - 2, peak + 2) >= SYNC_UNMUTED_MIN_SNR);
+    summary.otherPeaks = peaks.slice(0, SYNC_SUMMARY_PEAKS).map(peak => ({...describe(peak), unmutedResidual: +maxIn(unmutedResidual, peak - 2, peak + 2).toFixed(1)}));
+    if (!peaks.length || whole[peaks[0]] < SYNC_MIN_SNR) {
+        throw new SyncError("No other device heard (or it is in sync with this one)");
+    }
     const spread = Math.round(SYNC_DEVICES_SPREAD_S * analysisRate);
-    if (peaks.some(peak => Math.abs(peak - peaks[0]) > spread && zM[peak] >= SYNC_AMBIGUOUS_RATIO * zM[peaks[0]])) {
+    if (peaks.some(peak => Math.abs(peak - peaks[0]) > spread && whole[peak] >= SYNC_AMBIGUOUS_RATIO * whole[peaks[0]])) {
         throw new SyncError("Couldn't tell where the other device is (repeating music or several devices), try again in a moment");
     }
-    const others = peaks.filter(peak => zM[peak] >= SYNC_OTHER_DEVICE_RATIO * zM[peaks[0]]);
+    const others = peaks.filter(peak => whole[peak] >= SYNC_OTHER_DEVICE_RATIO * whole[peaks[0]]);
 
-    const sidelobes = Math.round(SYNC_SIDELOBE_S * analysisRate);
-    own = directArrival(zU, own, reflections, sidelobes);
-    others[0] = directArrival(zM, others[0], reflections, sidelobes);
+    // earlier arrivals must belong to the same device: gone while muted for this device, heard while muted for others
+    others[0] = directArrival(whole, others[0], reflections, sidelobes, peak => muted(peak) >= SYNC_MUTED_MIN_SNR);
     const ownPosition = own + parabolicOffset(zU, own);
-    const offsetOf = peak => (peak + parabolicOffset(zM, peak) - shift - ownPosition) / analysisRate;
+    const offsetOf = peak => (peak + parabolicOffset(whole, peak) - ownPosition) / analysisRate;
     summary.own = describe(own);
-    summary.other = describe(others[0] - shift);
+    summary.other = describe(others[0]);
     return {offset: offsetOf(others[0]), others: others.slice(1).map(offsetOf)};
 }
 
@@ -560,9 +678,13 @@ function downloadSyncDebug(recording, {reference, referenceStart, rate}, summary
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
     };
-    download(wavBlob(recording, rate), "recording.wav");
-    download(wavBlob(reference, rate / analysisFactor(rate)), `reference-${referenceStart.toFixed(3)}s.wav`);
-    download(new Blob([JSON.stringify(summary, null, 2)], {type: "application/json"}), "summary.json");
+    // one file at a time, summary first: Firefox once saved an empty summary when it came right after the recordings
+    const files = [
+        () => download(new Blob([JSON.stringify(summary, null, 2)], {type: "application/json"}), "summary.json"),
+        () => download(wavBlob(recording, rate), "recording.wav"),
+        () => download(wavBlob(reference, rate / analysisFactor(rate)), `reference-${referenceStart.toFixed(3)}s.wav`)
+    ];
+    files.forEach((file, i) => setTimeout(file, i * 1000));
 }
 
 // mono 16-bit PCM WAV
@@ -586,13 +708,84 @@ function wavBlob(samples, rate) {
 }
 
 // reflections arrive later, so they match earlier song positions: the latest comparably strong match within the
-// reflection time is the direct sound
-function directArrival(values, peak, reflections, sidelobes) {
+// reflection time is the direct sound, among the matches for which counts(k) is true
+function directArrival(values, peak, reflections, sidelobes, counts = () => true) {
     let direct = peak;
     for (let k = peak + sidelobes; k <= Math.min(values.length - 2, peak + reflections); k++) {
-        if (values[k] >= values[k - 1] && values[k] > values[k + 1] && values[k] >= SYNC_DIRECT_RATIO * values[peak]) direct = k;
+        if (values[k] >= values[k - 1] && values[k] > values[k + 1] && values[k] >= SYNC_DIRECT_RATIO * values[peak] && counts(k)) {
+            direct = k;
+        }
     }
     return direct;
+}
+
+// least-squares response g with x[i] ≈ sum of g[k] * aligned[i + k] over k < taps in the recording's parts
+function fitResponse(x, aligned, alignedSpectrum, parts, taps) {
+    // products of the regressors aligned[i + a] and aligned[i + b] (a, b < taps), and of them with the recording
+    const [masked, first] = [new Float64Array(x.length), new Float64Array(x.length)];
+    for (const [from, to] of parts) {
+        masked.set(x.subarray(from, to), from);
+        first.set(aligned.subarray(from, to), from);
+    }
+    const vector = crossCorrelate(masked, alignedSpectrum).slice(0, taps);
+    const matrix = new Float64Array(taps * taps);
+    matrix.set(crossCorrelate(first, alignedSpectrum).subarray(0, taps));
+    // the products of a and b sum to those of a - 1 and b - 1, shifted by one sample
+    for (let a = 1; a < taps; a++) {
+        matrix[a * taps] = matrix[a];
+        for (let b = a; b < taps; b++) {
+            let sum = matrix[(a - 1) * taps + b - 1];
+            for (const [from, to] of parts) sum += aligned[to + a - 1] * aligned[to + b - 1] - aligned[from + a - 1] * aligned[from + b - 1];
+            matrix[a * taps + b] = matrix[b * taps + a] = sum;
+        }
+    }
+    let trace = 0;
+    for (let a = 0; a < taps; a++) trace += matrix[a * taps + a];
+    for (let a = 0; a < taps; a++) matrix[a * taps + a] += SYNC_RESPONSE_REGULARIZATION * trace / taps + 1e-12;
+    return solveSymmetric(matrix, vector, taps);
+}
+
+// c[k] = sum of y[i] * signal[i + k] for the signal's spectrum (of a power of two size, without wrapping around)
+function crossCorrelate(y, {re: sRe, im: sIm}) {
+    const size = sRe.length;
+    const {re, im} = spectrum(y, size);
+    for (let bin = 0; bin < size; bin++) {
+        // conj(Y) * S
+        const product = re[bin] * sRe[bin] + im[bin] * sIm[bin];
+        im[bin] = re[bin] * sIm[bin] - im[bin] * sRe[bin];
+        re[bin] = product;
+    }
+    fft(re, im, true);
+    return re;
+}
+
+// solves the positive definite system matrix * result = vector (m x m, row-major) approximately, by conjugate gradients
+// (the strong components of the response converge first)
+function solveSymmetric(matrix, vector, m) {
+    const result = new Float64Array(m);
+    const residual = Float64Array.from(vector);
+    const direction = Float64Array.from(vector);
+    const product = new Float64Array(m);
+    let norm = residual.reduce((sum, value) => sum + value * value, 0);
+    for (let iteration = 0; iteration < SYNC_RESPONSE_ITERATIONS && norm > 0; iteration++) {
+        let curvature = 0;
+        for (let i = 0; i < m; i++) {
+            let sum = 0;
+            for (let j = 0, row = i * m; j < m; j++) sum += matrix[row + j] * direction[j];
+            product[i] = sum;
+            curvature += direction[i] * sum;
+        }
+        const step = norm / curvature;
+        let next = 0;
+        for (let i = 0; i < m; i++) {
+            result[i] += step * direction[i];
+            residual[i] -= step * product[i];
+            next += residual[i] * residual[i];
+        }
+        for (let i = 0; i < m; i++) direction[i] = residual[i] + next / norm * direction[i];
+        norm = next;
+    }
+    return result;
 }
 
 function rms(signal, from, length) {
@@ -648,7 +841,7 @@ function correlate(x, referenceSpectrum, n, rate) {
         // conj(X) * S
         const re = xRe[bin] * sRe[bin] + xIm[bin] * sIm[bin];
         const im = xRe[bin] * sIm[bin] - xIm[bin] * sRe[bin];
-        const weight = 1 / (Math.pow(Math.hypot(re, im), SYNC_PHAT_BETA) + 1e-12);
+        const weight = 1 / (Math.pow(re * re + im * im, SYNC_PHAT_BETA / 2) + 1e-12);
         xRe[bin] = re * weight;
         xIm[bin] = im * weight;
     }
